@@ -1,0 +1,802 @@
+Coroutines cancellation is tricky because it must be "cooperative".
+
+----------------------------
+Cooperative Cancellation::
+----------------------------
+
+
+
+class CoroutinesCancellationCooperativeDemoFragment : BaseFragment() {
+
+    private val coroutineScope = CoroutineScope(Dispatchers.Main.immediate)
+
+    override val screenTitle get() = ScreenReachableFromHome.SCOPE_CHILDREN_CANCELLATION_DEMO.description
+
+    private lateinit var benchmarkUseCase: CancellableBenchmarkUseCase
+
+    private lateinit var btnStart: Button
+    private lateinit var txtRemainingTime: TextView
+
+    private var hasBenchmarkBeenStartedOnce = false
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        benchmarkUseCase = compositionRoot.cancellableBenchmarkUseCase
+    }
+
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
+        val view = inflater.inflate(R.layout.fragment_loop_iterations_demo, container, false)
+
+        txtRemainingTime = view.findViewById(R.id.txt_remaining_time)
+
+        btnStart = view.findViewById(R.id.btn_start)
+        btnStart.setOnClickListener {
+            logThreadInfo("button callback")
+
+            val benchmarkDurationSeconds = 5
+
+            coroutineScope.launch {
+                updateRemainingTime(benchmarkDurationSeconds)
+            }
+
+            coroutineScope.launch {
+                btnStart.isEnabled = false
+                val iterationsCount = benchmarkUseCase.executeBenchmark(benchmarkDurationSeconds)
+                Toast.makeText(requireContext(), "$iterationsCount", Toast.LENGTH_SHORT).show()
+                btnStart.isEnabled = true
+            }
+
+            hasBenchmarkBeenStartedOnce = true
+        }
+
+        return view
+    }
+
+    override fun onStop() {
+        logThreadInfo("onStop()")
+        super.onStop()
+        coroutineScope.coroutineContext.cancelChildren()  // we cancel the coroutine scope and all its children
+        if (hasBenchmarkBeenStartedOnce) {               
+            btnStart.isEnabled = true                    // Hack code to reset/re-init the UI elements upon
+            txtRemainingTime.text = "done!"              // exit of fragment while benchmark is request to stop
+        }
+    }
+
+    private suspend fun updateRemainingTime(remainingTimeSeconds: Int) {
+        for (time in remainingTimeSeconds downTo 0) {
+            if (time > 0) {
+                logThreadInfo("updateRemainingTime: $time seconds")
+                txtRemainingTime.text = "$time seconds remaining"
+                delay(1000)
+            } else {
+                txtRemainingTime.text = "done!"
+            }
+        }
+    }
+
+    private fun logThreadInfo(message: String) {
+        ThreadInfoLogger.logThreadInfo(message)
+    }
+
+    companion object {
+        fun newInstance(): Fragment {
+            return ScopeChildrenCancellationDemoFragment()
+        }
+    }
+}
+
+
+class CancellableBenchmarkUseCase {
+
+    suspend fun executeBenchmark(benchmarkDurationSeconds: Int) = withContext(Dispatchers.Default) {
+        logThreadInfo("benchmark started")
+
+        val stopTimeNano = System.nanoTime() + benchmarkDurationSeconds * 1_000_000_000L
+
+        var iterationsCount: Long = 0
+        while (System.nanoTime() < stopTimeNano) { // this bench mark continues to executed even after 	
+        													  //cancelling coroutine scope and all of its children
+            iterationsCount++								
+        }
+
+        logThreadInfo("benchmark completed") // this gets printed on console after 2 secs of cancellation of
+                                             // coroutine scope and all of its children in onStop() of fragment
+        iterationsCount
+    }
+
+}
+
+Goal to acheive:    cancel/stop all concurrent activities to get cancelled/stop as quikly as possible
+					when the fragment exits/closes. 
+					Also need some control area to set-up/re-init UI elements on cancelling of executing 
+					concurrent code .
+
+Way to achieve the Goal:
+					properly handle the cancellation of coroutine.
+
+				""" Whenever a coroutine is cancelled, CancellationException is thrown """ 
+
+				eventhough the exception is thrown and its not handled, it doesnt crash the app of not 
+				handling it in coroutines. In above code we can observe the Exception is not Handled.
+
+
+class CancellableBenchmarkUseCase {
+
+    suspend fun executeBenchmark(benchmarkDurationSeconds: Int) = withContext(Dispatchers.Default) {
+        logThreadInfo("benchmark started")
+
+        val stopTimeNano = System.nanoTime() + benchmarkDurationSeconds * 1_000_000_000L
+
+        var iterationsCount: Long = 0
+        while (System.nanoTime() < stopTimeNano) { // this bench mark continues to executed even after 	
+        											//cancelling coroutine scope and all of its children
+            iterationsCount++								
+        }
+
+        logThreadInfo("benchmark completed") // this gets printed on console after 2 secs of cancellation of
+                                           // coroutine scope and all of its children in onStop() of fragment
+        iterationsCount
+    } 
+
+     // if this coroutine is cancelled, the exception is thrown to caller only upon exit of this method, it doesnt
+      // stop coroutine abruptly, coroutine continues to execute even after cancellation. 
+
+      // This method is not co-operative with the caller who cancels it. to make this method/coroutine to work
+      // cooperatively with the caller we use a property of coroutine "isActive" to ensure continue execution of 
+      // coroutine. the main concurrent work should use this field/property of coroutine to force the
+      // coroutine to behave cooperatively with the caller.
+
+}
+
+
+// changed code after using "isActive"
+
+class CancellableBenchmarkUseCase {
+
+    suspend fun executeBenchmark(benchmarkDurationSeconds: Int) = withContext(Dispatchers.Default) {
+        logThreadInfo("benchmark started")
+
+        val stopTimeNano = System.nanoTime() + benchmarkDurationSeconds * 1_000_000_000L
+
+        var iterationsCount: Long = 0
+        while (System.nanoTime() < stopTimeNano && isActive) { // everytime this bench mark executes it actively
+        												      // checks whether this coroutine is still active, the 
+        												      // moment caller cancels this coroutine, the state of 
+        													  // "isActive" property fails. we manually exit the 
+        													  // coroutine immediately
+            iterationsCount++								
+        }
+
+        logThreadInfo("benchmark completed") // this gets printed on console immediately of cancellation of
+                                             // coroutine scope in onStop() of fragment
+        iterationsCount
+    }
+}
+
+---------------------------------------------------------------------------------------------------------
+coroutineScope.coroutineContext.cancelChildren() will immediately set the coroutine property "isActive"
+to false. Code inside the coroutine should always use this property upon the active/inactive of the
+coroutine and should manually/voluntarily exit the coroutine when its set to "false"(means coroutine is cancelled from outside)
+---------------------------------------------------------------------------------------------------------
+
+control area to set-up/re-init UI elements on cancelling of executing concurrent code can be 
+handled inside the catch block of CancellationException. This exception is always
+thrown upon cancelling the coroutiene, hence in catch block we can handle to set-up/re-init UI 
+elements on cancelling of coroutine.
+
+ override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
+        val view = inflater.inflate(R.layout.fragment_loop_iterations_demo, container, false)
+
+        txtRemainingTime = view.findViewById(R.id.txt_remaining_time)
+
+        btnStart = view.findViewById(R.id.btn_start)
+        btnStart.setOnClickListener {
+            logThreadInfo("button callback")
+
+            val benchmarkDurationSeconds = 5
+
+            coroutineScope.launch {
+                updateRemainingTime(benchmarkDurationSeconds)
+            }
+
+            coroutineScope.launch {
+                try {
+                    btnStart.isEnabled = false
+                    val iterationsCount = benchmarkUseCase.executeBenchmark(benchmarkDurationSeconds)
+
+                    // below code will not be executed upon cancellation of coroutine when the control
+                    // is in executing the executeBenchmark() method which is "suspend" method
+
+                    Toast.makeText(requireContext(), "$iterationsCount", Toast.LENGTH_SHORT).show()
+                    btnStart.isEnabled = true
+                } catch (e: CancellationException) {
+                    btnStart.isEnabled = true                   // re-init Ui elements is handled here
+                    txtRemainingTime.text = "done!"
+                    logThreadInfo("coroutine cancelled")
+                    Toast.makeText(requireContext(), "cancelled", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        return view
+    }
+
+    override fun onStop() {
+        logThreadInfo("onStop()")
+        super.onStop()
+        coroutineScope.coroutineContext.cancelChildren()
+        // code which re-init Ui elements is removed here
+    }
+
+
+  executeBenchmark() encapsulates long running concurrent operations, eventhough the operation is 
+  long running, make the control to wait until the completion of  executeBenchmark() and then continue to 
+  execute the other code parts associated with it, because of this property we can write code associated on status of executeBenchmark() ( means if the executeBenchmark() call is sucessful then execute code which shows the result toast and reenable the Ui elements, if the executeBenchmark() call is not sucessful then execute some code which shows the cancelled toast and reenable the Ui elements), this is the power or effect of coroutine
+  using "structured concurrency paradigm".
+
+
+----------------------------------------------------------------------------------------------------------------
+								:: Importance of CancellationException ::
+----------------------------------------------------------------------------------------------------------------
+The below code will interact with coroutine and Handle the cancellation cooperatively. By checking the
+"isActive" field inside coroutine all the time. If the state changes then we exit the coroutine immediately.
+In below code, if the coroutine is cancelled by caller only in that case executeBenchmark() use case will throw "CancellationException" to the caller. Caller can handle the CancellationException and re-init its UI elements based on the usecase/functionality.
+
+
+
+class CoroutinesCancellationCooperativeDemoFragment : BaseFragment() {
+
+    private val coroutineScope = CoroutineScope(Dispatchers.Main.immediate)
+
+    override val screenTitle get() = ScreenReachableFromHome.COROUTINES_CANCELLATION_COOPERATIVE_DEMO.description
+
+    private lateinit var benchmarkUseCase: CancellableBenchmarkUseCase
+
+    private lateinit var btnStart: Button
+    private lateinit var txtRemainingTime: TextView
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        benchmarkUseCase = compositionRoot.cancellableBenchmarkUseCase
+    }
+
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
+        val view = inflater.inflate(R.layout.fragment_loop_iterations_demo, container, false)
+
+        txtRemainingTime = view.findViewById(R.id.txt_remaining_time)
+
+        btnStart = view.findViewById(R.id.btn_start)
+        btnStart.setOnClickListener {
+            logThreadInfo("button callback")
+
+            val benchmarkDurationSeconds = 5
+
+            coroutineScope.launch {
+                updateRemainingTime(benchmarkDurationSeconds)
+            }
+
+            coroutineScope.launch {
+                try {
+                    btnStart.isEnabled = false
+                    val iterationsCount = benchmarkUseCase.executeBenchmark(benchmarkDurationSeconds)
+                    Toast.makeText(requireContext(), "$iterationsCount", Toast.LENGTH_SHORT).show()
+                    btnStart.isEnabled = true
+                } catch (e: CancellationException) {
+                    btnStart.isEnabled = true
+                    txtRemainingTime.text = "done!"
+                    logThreadInfo("coroutine cancelled")
+                    Toast.makeText(requireContext(), "cancelled", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        return view
+    }
+
+    override fun onStop() {
+        logThreadInfo("onStop()")
+        super.onStop()
+        coroutineScope.coroutineContext.cancelChildren()
+    }
+
+
+    private suspend fun updateRemainingTime(remainingTimeSeconds: Int) {
+        for (time in remainingTimeSeconds downTo 0) {
+            if (time > 0) {
+                logThreadInfo("updateRemainingTime: $time seconds")
+                txtRemainingTime.text = "$time seconds remaining"
+                delay(1000)
+            } else {
+                txtRemainingTime.text = "done!"
+            }
+        }
+    }
+
+    companion object {
+        fun newInstance(): Fragment {
+            return CoroutinesCancellationCooperativeDemoFragment()
+        }
+    }
+}
+
+class CancellableBenchmarkUseCase {
+
+    suspend fun executeBenchmark(benchmarkDurationSeconds: Int) = withContext(Dispatchers.Default) {
+        logThreadInfo("benchmark started")
+
+        val stopTimeNano = System.nanoTime() + benchmarkDurationSeconds * 1_000_000_000L
+
+        var iterationsCount: Long = 0
+        while (System.nanoTime() < stopTimeNano && isActive) {
+            iterationsCount++
+        }
+
+        logThreadInfo("benchmark completed")
+
+        iterationsCount
+    }
+
+}
+
+In the suspend function executeBenchmark(), can we always access "IsActive" field/property to check the
+coroutine is active/not.???? -- No
+
+Does the suspend function executeBenchmark() will always throw CancellationException if we cancel the
+coroutine????? ------ No
+
+
+below code does the same work, but it modified by removing the withContext {} in executeBenchMark() method
+
+class BlockingBenchmarkUseCase {
+
+    suspend fun executeBenchmark(benchmarkDurationSeconds: Int): Long {   // removed withContext {}
+        logThreadInfo("benchmark started")
+
+        val stopTimeNano = System.nanoTime() + benchmarkDurationSeconds * 1_000_000_000L
+
+        var iterationsCount: Long = 0
+        while (System.nanoTime() < stopTimeNano && coroutineContext.isActive) { // after removing withContext{}
+            iterationsCount++                                                   // we can nolonger use isInactive
+        }                                                               // directly, we can refer it only though
+                                                                        // coroutineContext which is the context
+                                                                        // of the coroutine which calls this
+                                                                       // executeBenchmark() suspend function
+        logThreadInfo("benchmark completed")
+
+        return iterationsCount // return Long value of iterationsCount
+    }
+
+}
+
+// BlockingBenchMarkUseCase caller code
+
+    private val coroutineScope = CoroutineScope(Dispatchers.Main.immediate)
+
+    private lateinit var benchmarkUseCase: BlockingBenchmarkUseCase
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        benchmarkUseCase = compositionRoot.blockingBenchmarkUseCase
+    }
+
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
+        val view = inflater.inflate(R.layout.fragment_loop_iterations_demo, container, false)
+
+        txtRemainingTime = view.findViewById(R.id.txt_remaining_time)
+
+        btnStart = view.findViewById(R.id.btn_start)
+        btnStart.setOnClickListener {
+            logThreadInfo("button callback")
+
+            val benchmarkDurationSeconds = 5
+
+            coroutineScope.launch() {
+                updateRemainingTime(benchmarkDurationSeconds)
+            }
+
+            // since "coroutineScope" dispatcher is Dispatchers.Main.immediate(set on initialisation)
+            // "executeBenchmark()" is blocking code, we have to execute it in a background thread dispatcher
+            // Hence we launch it in Dispatchers.Default.
+
+            coroutineScope.launch(Dispatchers.Default) {
+                try {
+                    val iterationsCount = benchmarkUseCase.executeBenchmark(benchmarkDurationSeconds)
+                    logThreadInfo("benchmarked iterations: $iterationsCount")
+                } catch (e: CancellationException) {
+                    logThreadInfo("coroutine cancelled")
+                }
+            }
+        }
+
+        return view
+    }
+
+    override fun onStop() {
+        logThreadInfo("onStop()")
+        super.onStop()
+        coroutineScope.coroutineContext.cancelChildren()
+    }
+
+// Behaviour of above code:
+	User action: press button to start the benchmark, then press "home" to send the app to background(which
+				 internally cause the fragment to call onStop())
+	
+	Behaviour: In onStop() we cancel the coroutine context and all of its children, 
+			   
+			   which will change the state of "IsActive" field in the executeBenchmark() function which inturn cause the while loop inside the executeBenchmark() to break.
+
+			   "benchmark completed" log statement is executed in the executeBenchmark() function
+
+			   executeBenchmark() method will return the iterationcount to the caller.
+
+			   "benchmarked iterations: $iterationsCount" log statement will get executed (eventhough
+			    executeBenchmark() is cancelled, CancellationException is not thrown to the caller.
+
+			    executeBenchmark() returned normally and the next statement in try block which is 
+			    logThreadInfo("benchmarked iterations: $iterationsCount") is executed.
+
+
+why executeBenchmark() didnt throw CancellationException when coroutine is cancelled in onStop()??
+	Now executeBenchmark() is just a simple suspend function(withContext{} is removed), 
+	which will just block the caller to wait until the suspend function executeBenchmark()
+	completes execution.
+
+	Its the property of withContext{} method which will check whether the caller coroutiene is active / not
+		when it will check??
+			a. before the starts executing the withContext block, check coroutine is active
+			b. before exiting the withContext block, check coroutine is active
+
+	If the coroutine is found inactive it throws the CancellationException to the caller.
+
+But in the above code we implemented the executeBenchmark() as a simple suspend function without
+withContext{} block. In this case we need to manually throw the CancellationException like the sample code below
+
+class BlockingBenchmarkUseCase {
+
+    suspend fun executeBenchmark(benchmarkDurationSeconds: Int): Long {   // removed withContext {}
+        logThreadInfo("benchmark started")
+
+        val stopTimeNano = System.nanoTime() + benchmarkDurationSeconds * 1_000_000_000L
+
+        var iterationsCount: Long = 0
+        while (System.nanoTime() < stopTimeNano) { // after removing withContext{} we can nolonger 
+        	if (!coroutineContext.isActive) {      // use isInactive directly, we can refer it only 
+        		throw CancellationException()      // through coroutineContext which is the context
+        	}                                      // of the coroutine which calls this executeBenchmark()
+        	                                       // suspend function
+            iterationsCount++                                                   
+		}                   
+
+        logThreadInfo("benchmark completed")
+
+        return iterationsCount
+    }
+
+}
+
+when the caller cancel the coroutine context in onStop(), then coroutineContext.isActive state will
+become "false" immediately, where we manually throw the CancellationException to the caller and return
+from the executeBenchmark() immediately by not executing futher statement in it and intimate
+the caller that the coroutine is cancelled coopeatively.
+
+
+the exuivalent code / method call for the below code is 
+
+  	if (!coroutineContext.isActive) {      
+        throw CancellationException()
+    }
+
+kotlin provides a shortcut method call which is equivalent of the above code
+
+	coroutineContext.ensureActive()
+
+which will internally check the Job(is the object returned when a coroutine is launched) active or not.
+If it found in-active, it will throw CancellationException
+
+class BlockingBenchmarkUseCase {
+
+    suspend fun executeBenchmark(benchmarkDurationSeconds: Int): Long {
+        logThreadInfo("benchmark started")
+
+        val stopTimeNano = System.nanoTime() + benchmarkDurationSeconds * 1_000_000_000L
+
+        var iterationsCount: Long = 0
+        while (System.nanoTime() < stopTimeNano) {
+            coroutineContext.ensureActive() // this method will support proper cancellation (throwing
+            iterationsCount++              // CancellationException to the caller when coroutine is 
+        }									// cancelled in between by the user.
+
+        logThreadInfo("benchmark completed")
+
+        return iterationsCount
+    }
+
+}
+
+Rule of Thumb::
+----------------
+	whenever we cancel anything with in suspending function throw CancellationException, unless we
+	a good reason to avoid that. 
+
+
+--------------------------------------------------------------------------------------------------------------------
+										NON CANCELLABLE
+--------------------------------------------------------------------------------------------------------------------
+
+concept here is to show demo on how to handle a code-part which should not be cancellable and 
+execute in a atomic way.below fragment will call a method makeCustomerPremium() in a 
+coroutineScope and if the fragment is closed because of user activity then it cancels the 
+coroutine in onStop()
+
+
+
+class NonCancellableDemoFragment : BaseFragment() {
+
+    private val coroutineScope = CoroutineScope(Dispatchers.Main.immediate)
+
+    override val screenTitle get() = ScreenReachableFromHome.EXERCISE_6.description
+
+    private lateinit var makeCustomerPremiumUseCase: MakeCustomerPremiumUseCase
+
+    private lateinit var edtCustomerId: EditText
+    private lateinit var btnMakePremium: Button
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        makeCustomerPremiumUseCase = compositionRoot.makeCustomerPremiumUseCase
+    }
+
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
+        val view = inflater.inflate(R.layout.fragment_premium_customer, container, false)
+
+        view.apply {
+            edtCustomerId = findViewById(R.id.edt_customer_id)
+            btnMakePremium = findViewById(R.id.btn_make_premium)
+        }
+
+        edtCustomerId.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {            }
+
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                btnMakePremium.isEnabled = !s.isNullOrEmpty()
+            }
+
+            override fun afterTextChanged(s: Editable?) {}
+        })
+
+        btnMakePremium.setOnClickListener {
+            logThreadInfo("button callback")
+
+            val benchmarkDurationSeconds = 5
+
+            coroutineScope.launch {
+                try {
+                    disableUserInput()
+                    makeCustomerPremiumUseCase.makeCustomerPremium(edtCustomerId.text.toString())
+                    enableUserInput()
+                    Toast.makeText(requireContext(), "the user became premium", Toast.LENGTH_SHORT).show()
+                } catch (e: CancellationException) {
+                    enableUserInput()
+                    logThreadInfo("flow cancelled")
+                }
+            }
+        }
+
+        return view
+    }
+
+    private fun enableUserInput() {
+        edtCustomerId.isEnabled = true
+        btnMakePremium.isEnabled = true
+    }
+
+    private fun disableUserInput() {
+        edtCustomerId.isEnabled = false
+        btnMakePremium.isEnabled = false
+    }
+
+    override fun onStop() {
+        logThreadInfo("onStop()")
+        super.onStop()
+        coroutineScope.coroutineContext.cancelChildren()
+    }
+
+    companion object {
+        fun newInstance(): Fragment {
+            return NonCancellableDemoFragment()
+        }
+    }
+}
+
+-------------------------------------------------------------------------------------------------------
+
+withContext() {} block will throw a CancellationException when it enters the block it check of 
+coroutine active status, also while exit the block it check for coroutine active status. if the coroutine is
+not active then it throws the CancellationException, similarly 
+
+"" delay(time) is also throw coroutine CancellationException when the enclosed coroutine becomes inactive"" 
+
+Below code shows the usecase where it does 2 important operations
+1. premiumCustomersEndpoint.makeCustomerPremium(customerId)  will update the customer as premium in server
+	(this will take approx delay of ~2 secs)
+2. customersDao.updateCustomer(updatedCustomer) will update the customer as premium in local database.
+   (this will take approx delay of ~2 secs)
+
+either both the updation should'nt happen, or both(server &  database) should be updated like a atomic operation
+
+if the first activity of updating in the server is in progress. if user close the app which will cancel
+the coroutine and fail to update in the database which will provide inconsistency between the server and local database . Here we can see the status of the customer as premium is updated in server and failed to update in database. contradiction of result.
+
+we can observe, the update of status of customer as premium should happen in server and database. Hence
+the hapenning of these two activity should not be interruped or cancellable in between.
+
+We have to enclose both of these activity(server update and database update) with in a block where the activity
+shouldnt be cancellable and return to invoker(fragment) with the status as task cancelled.
+-------------------------------------------------------------------------------------------------------
+class MakeCustomerPremiumUseCase(
+        private val premiumCustomersEndpoint: PremiumCustomersEndpoint,
+        private val customersDao: CustomersDao
+) {
+
+    /**
+     * Give the customer premium status
+     * @return updated information about the customer
+     */
+    suspend fun makeCustomerPremium(customerId: String): Customer {
+        return withContext(Dispatchers.Default) {
+        		
+        		// below is the block of code shouldnt be cancellable
+                val updatedCustomer = premiumCustomersEndpoint.makeCustomerPremium(customerId) // throw 
+                customersDao.updateCustomer(updatedCustomer)                               // CancellationException
+				// Above is the block of code shouldnt be cancellable                      // will avoid the code
+			                                                                            // below to execute
+                updatedCustomer
+        }
+    }
+
+}
+
+-------------------------------------------------------------------------------------------------------
+
+class PremiumCustomersEndpoint {
+
+    suspend fun makeCustomerPremium(customerId: String): Customer = withContext(Dispatchers.IO) {
+        logThreadInfo("changing customer's status to premium on the server")
+        delay(2000)
+        return@withContext Customer(customerId, true)
+    }
+}
+
+-------------------------------------------------------------------------------------------------------
+
+class CustomersDao {
+
+    suspend fun updateCustomer(customer: Customer) = withContext(Dispatchers.IO) {
+        logThreadInfo("updating local customer's data")
+        delay(2000)
+    }
+}
+
+-------------------------------------------------------------------------------------------------------
+
+data class Customer(val id: String, val premium: Boolean)
+
+-------------------------------------------------------------------------------------------------------
+		
+we have to wrap the block of code with withContext(NonCancellable) {} (or) add the NonCancellable Job along with the dispatcher to make the block of code non-cancellable.
+
+-------------------------------------------------------------------------------------------------------
+Solution 1 :: Making block of code Non-Cancellable by adding NonCancellable object with Dispatcher
+-------------------------------------------------------------------------------------------------------
+class MakeCustomerPremiumUseCase(
+        private val premiumCustomersEndpoint: PremiumCustomersEndpoint,
+        private val customersDao: CustomersDao
+) {
+
+    /**
+     * Give the customer premium status
+     * @return updated information about the customer
+     */
+    suspend fun makeCustomerPremium(customerId: String): Customer {
+        return withContext(Dispatchers.Default + NonCancellable) { // code in this block executes atomic,
+        														   // cant be cancelled, cause of NonCancellable job
+            
+                val updatedCustomer = premiumCustomersEndpoint.makeCustomerPremium(customerId)
+                customersDao.updateCustomer(updatedCustomer)
+                updatedCustomer
+        }
+    }
+
+}
+
+-------------------------------------------------------------------------------------------------------
+Solution 2 :: Making block of code Non-Cancellable by wrapping it withContext(NonCancellable) {} block
+-------------------------------------------------------------------------------------------------------
+class MakeCustomerPremiumUseCase(
+        private val premiumCustomersEndpoint: PremiumCustomersEndpoint,
+        private val customersDao: CustomersDao
+) {
+
+    /**
+     * Give the customer premium status
+     * @return updated information about the customer
+     */
+    suspend fun makeCustomerPremium(customerId: String): Customer {
+        return withContext(Dispatchers.Default) {
+
+            withContext(NonCancellable) { // code in this block executes atomic, cant be cancelled
+                val updatedCustomer = premiumCustomersEndpoint.makeCustomerPremium(customerId)
+                customersDao.updateCustomer(updatedCustomer)
+                updatedCustomer
+            }
+
+        }
+    }
+
+}
+
+exiting this NonCancellable block will still return CancellationException to the caller(fragment) 
+where the fragment
+can understand that the benchmark use case is cancelled by user and handle accordingly with the CancellationException caught.  But execution of NonCancellable block of code is not interrupted/cancelled
+
+---------------------------------
+logs for reference of code flow
+---------------------------------
+
+2021-01-03 18:01:38.268 18269-18269/com.techyourchance.coroutines I/ThreadInfoLogger: button callback; thread name: main; thread ID: 2
+
+2021-01-03 18:01:38.297 18269-18614/com.techyourchance.coroutines I/ThreadInfoLogger: changing customer's status to premium on the server; thread name: DefaultDispatcher-worker-2; thread ID: 823
+
+2021-01-03 18:01:40.016 18269-18269/com.techyourchance.coroutines I/ThreadInfoLogger: onStop(); thread name: main; thread ID: 2
+
+2021-01-03 18:01:40.315 18269-18615/com.techyourchance.coroutines I/ThreadInfoLogger: updating local customer's data; thread name: DefaultDispatcher-worker-3; thread ID: 824
+
+2021-01-03 18:01:42.325 18269-18269/com.techyourchance.coroutines I/ThreadInfoLogger: flow cancelled; thread name: main; thread ID: 2
+
+
+------------------------------------------------------------------------------------------------------------------
+									COROUTINE CANCELLATION SUMMARY
+------------------------------------------------------------------------------------------------------------------
+
+	coroutine cancellation is tricky because it must be cooperative.
+
+	code that is cancelled must cooperate in order to allow for proper and clean cancellation. Eventhough
+	the code that cancels the code shouldnt even know about the details of implementation of the cancelled 
+	logic.
+
+	its tricky and difficulet because, there is "no one size fits all" solution for coroutine's cancellation
+
+	3 cases:
+
+	1. first case, just rely on withCOntext{} is enough to throwback CancellationException.
+	2. second case, periodically check for "isActive" 
+	3. third case, flow should be active always otherwise throw CancellationException (ensureActive())
+
+	all above are different cases of handling Cancellation. None of them suggest a universal approach.
+	each case, need to understand the requirements and choose the appropriate statergy
+
+	In some cases, need to use NonCancellable to protect "critical parts of the code fromm being cancelled
+														  during execution" 
+
+    there will be cases where some parts of the code should be non-cancellable, even client wants to
+    cancel it, the app logic has to postpone the cancellation and make some parts of code under completion. 
+    In these cases have to use "NonCancellable" job to protect the code area. It takes deep understanding
+    and experience to find the code parts to be protected/ make atomic / make it non-cancellable.
+
+    """ Working with coroutines, remember always that the possibility of execution can be cancelled 
+    at any time.""" - missing can lead to  data corruption
+
+    "cancellation of coroutine is the weak spot of this coroutine framework"
+
+    "implementing proper cooperative cancellation is very difficult task"
+
+
+
+
+
+
+
+
+
+
+

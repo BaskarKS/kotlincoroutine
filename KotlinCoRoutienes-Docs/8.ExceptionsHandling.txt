@@ -1,0 +1,501 @@
+------------------------------------------------------------------------------------------------------------------
+									EXCEPTION HANDLING
+------------------------------------------------------------------------------------------------------------------
+	
+
+Uncaught Exception is Equal(==) to Error*
+
+Except for CancellationException (its just imply that parent coroutine is cancelled)
+
+Exception Handling is probably the most challenging aspect of Coroutine Framework.
+
+Exceptions thrown with-in coroutines are handled differently than standard exceptions in kotlin code.
+
+Coroutine ExceptionHandler is part of coroutine context, and this coroutine-exceptionHandler object is
+responsible for handling all uncaught exception. If you dont add this custom coroutine-exceptionhandler
+when creating coroutineScope we will able to see the uncaught exception using default-exceptionHandler which
+is the source to print the uncaughtException-stacktrace on the logs (In Unit tests).
+
+In android App, the default-exceptionHandler will delegate the uncaughtException to the Global-Android-Default_exceptionHandler which will kill/crash the App if it receives a uncaughtException.
+
+We can create custom coroutine-exceptionHandler using CoroutineExceptionHandler() class. and can set it
+as handler when we create a coroutineScope to Handle all the uncaught exception thrown out of the coroutine scope
+
+    @Test
+    fun caughtException() {
+        runBlocking {
+
+            val coroutineExceptionHandler = CoroutineExceptionHandler { _, throwable ->
+                println("Caught exception: $throwable")
+            }
+
+            val scope = CoroutineScope(Dispatchers.Default + coroutineExceptionHandler) // custom exceptionHandler
+            val job = scope.launch {                                                   // is set for the entire
+                delay(50)                                                              //coroutineScope
+                throw RuntimeException()
+            }
+            job.join()
+        }
+        Thread.sleep(100)
+        println("test completed")
+    }
+
+we can also set the customExceptionHandler only for a context level.
+
+	@Test
+    fun caughtExceptionAtCoroutineLevel() {
+        runBlocking {
+
+            val coroutineExceptionHandler = CoroutineExceptionHandler { _, throwable ->
+                println("Caught exception: $throwable")
+            }
+
+            val scope = CoroutineScope(Dispatchers.Default)
+            val job = scope.launch(coroutineExceptionHandler) { // custom exceptionHandler is installed at
+                delay(50)                                       // context level, we can also set to WithContext.
+                throw RuntimeException()
+            }
+            job.join()
+        }
+        Thread.sleep(100)
+        println("test completed")
+    }
+
+Handling of the exception inside the coroutine is deligated to the customExceptionHandler which
+is either installed at scope level or context level.
+
+If a uncaught exception inside a coroutine, it will be deligated to the installed customcoroutinehandler
+If we dont pass / define custom-coroutine-handler. then it will be deligated to android-default-exception-handler
+which will crash the application.
+
+-------------------------------------------
+Cancellation Chain on Uncaught-Exception:
+-------------------------------------------
+
+-----------------------------------------------CASE-1---------------default order of job completion-----------
+
+ @Test
+    fun concurrentCoroutines() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + Dispatchers.Default)
+            val job1 = scope.launch {										// coroutine-2, its independent of
+                delay(100)                                                // below defined coroutine. this complete
+                println("inside coroutine")                              // next to coroutine-3
+            }
+            val job2 = scope.launch {                                           // coroutine-3, its independent
+                delay(50)                                                // of above defined coroutine. this 
+            }                                                             // completes first
+            joinAll(job1, job2)                                      // wait till both the coroutine-2,3 completes
+            println("scopeJob: $scopeJob")
+            println("job1: $job1")
+            println("job2: $job2")
+        }
+        Thread.sleep(100)
+        println("test completed")
+    }
+
+// Logs of above Test:
+
+inside coroutine                                                               // top-most-job is active, 
+scopeJob: JobImpl{Active}@511baa65                     						  // cancel is not invoke on job/scope
+job1: "coroutine#2":StandaloneCoroutine{Completed}@340f438e                    // coroutine#2 goes to complete state
+job2: "coroutine#3":StandaloneCoroutine{Completed}@30c7da1e                    // coroutine#3 goes to complete state
+test completed
+
+// End of Logs of above Test
+
+Actually, coroutine#2, coroutine#3 completes its execution. but its launched scope (scopeJob) is still active
+because the scope / scopeJob is not cancelled. its available further to launch a new coroutine scope. If 
+the scope / scopeJob is cancelled then its state also will become cancelled
+
+-----------------------------------------------CASE-2----------Exception thrown in a coroutine--------------
+    @Test
+    fun uncaughtExceptionInConcurrentCoroutines() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + Dispatchers.Default)
+            val job1 = scope.launch {
+                delay(100)
+                println("inside coroutine")
+            }
+            val job2 = scope.launch {
+                delay(50)
+                throw RuntimeException()                                   // initiate exception in coroutine#3
+            }                                                              // didnt define custom exceptionHandler
+            joinAll(job1, job2)
+            println("scopeJob: $scopeJob")
+            println("job1: $job1")
+            println("job2: $job2")
+        }
+        Thread.sleep(100)
+        println("test completed")
+    }
+
+// Logs of above Test:
+-----------------------
+
+Exception in thread "DefaultDispatcher-worker-1 @coroutine#3" java.lang.RuntimeException
+	at com.techyourchance.coroutines.demonstrations.cancellationonexception.CancellationOnExceptionDemoTest$uncaughtExceptionInConcurrentCoroutines$1$job2$1.invokeSuspend(CancellationOnExceptionDemoTest.kt:41)
+
+scopeJob: JobImpl{Cancelled}@3f3afe78                                     // Exception cause to cancel top-most-job
+job1: "coroutine#2":StandaloneCoroutine{Cancelled}@7f63425a               // Exception cause to cancel coroutine#2
+job2: "coroutine#3":StandaloneCoroutine{Cancelled}@36d64342               // Exception cause to cancel coroutine#3
+test completed
+
+// End of Logs of above Test
+------------------------------
+
+Exception occurred in coroutine#3 which is independent to coroutine#2. But the exception cause coroutine#2 to
+cancel and the top-most-scope is also cancelled because of exception occurred in one of its child coroutines.
+the exception occurred in coroutine#3 will cancel the parent-scope which is "scopeJob", cancellation of
+"scopeJob" will cancel all of its children coroutines which cause to cancel coroutine#2 also.
+
+
+------------CASE-3----------Exception thrown in a coroutine, Handled using custom exception Handler--------------
+
+    @Test
+    fun uncaughtExceptionInConcurrentCoroutinesWithExceptionHandler() {
+        runBlocking {
+            val coroutineExceptionHandler = CoroutineExceptionHandler{ _, throwable ->            // Custom
+                println("Caught exception: $throwable")                                         // Exception
+            }                                                                                    // handler
+
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + Dispatchers.Default + coroutineExceptionHandler) // add custom
+            val job1 = scope.launch {                                                          // exceptionhandler
+                delay(100)                                                                   // for coroutinescope
+                println("inside coroutine")
+            }
+            val job2 = scope.launch {
+                delay(50)
+                throw RuntimeException()									// initiate exception in coroutine#3
+            }
+            joinAll(job1, job2)
+            println("scopeJob: $scopeJob")
+            println("job1: $job1")
+            println("job2: $job2")
+        }
+        Thread.sleep(100)
+        println("test completed")
+    }
+
+
+// Logs of above Test:
+-----------------------
+
+Caught exception: java.lang.RuntimeException                     // exception is caught by customexception handler
+scopeJob: JobImpl{Cancelled}@17c68925                       // top-most-scope is cancelled because handled exception
+job1: "coroutine#2":StandaloneCoroutine{Cancelled}@7e0ea639     // child of scope is cancelled, because scope cancel
+job2: "coroutine#3":StandaloneCoroutine{Cancelled}@3d24753a     // exception raised coroutine is cancelled
+test completed
+
+// End of Logs of above Test
+------------------------------
+
+Exception raised by coroutine-3 is handled by our custom exception Handler also it cancels the parent scope which inturn pass the cancellationSignal to all of its children of the coroutinescope (cause coroutine-2 also to cancel). 
+
+Actually exception raised by coroutine-3 should only cancel coroutine-3. it should not cancel its parent scope (scope/scopeJob) and should not cancel the other children of the parent-scope (coroutine-2).
+
+--------------------------------------------------------------------------------------------------------
+			TECHNIQUE TO PREVENT THE CANCELLATION OF PARENT SCOPE
+--------------------------------------------------------------------------------------------------------
+
+The interrupt occurred coroutine(failed coroutine) is cancelled. Instead of using normal Job() instance, using "SupervisorJob" as the top-most-level Job for the top-most-level coroutineScope, now whenever one of the child
+coroutine of top-most-coroutineScope fails/cancel because of exception raised in it. The failure will be isolated 
+ to that specific coroutine, the interrupt/failure/cancel is not probagated which will not cancel the entire
+ coroutineScope and therefore it will not affect the other child coroutines of the coroutineScope.
+ But the exception raised with in the coroutine will be delegated to default-exception-handler if we didnt define 
+ a custom exceptionHandler.
+
+ // custom exception handler is not defined and assigned. Instead of passing Job() instance as the top-most-level 
+ Job to top-most-level coroutine, we pass SupervisorJob() instance.
+
+     @Test
+    fun uncaughtExceptionInConcurrentCoroutinesWithSupervisorJob() {
+        runBlocking {
+            val scopeJob = SupervisorJob()                               // passing SupervisorJob instance
+            val scope = CoroutineScope(scopeJob + Dispatchers.Default)   // 
+            val job1 = scope.launch {
+                delay(100)
+                println("inside coroutine")
+            }
+            val job2 = scope.launch {
+                delay(50)
+                throw RuntimeException()
+            }
+            joinAll(job1, job2)
+            println("scopeJob: $scopeJob")
+            println("job1: $job1")
+            println("job2: $job2")
+        }
+        Thread.sleep(100)
+        println("test completed")
+    }
+
+	
+
+// Logs of above Test:
+-----------------------
+
+inside coroutine                                                 // other child coroutine completed sucessfully
+Exception in thread "DefaultDispatcher-worker-1 @coroutine#3" java.lang.RuntimeException
+	at com.techyourchance.coroutines.demonstrations.supervisorjob.SupervisorJobDemoTest$uncaughtExceptionInConcurrentCoroutinesWithSupervisorJob$1$job2$1.invokeSuspend(SupervisorJobDemoTest.kt:42)
+scopeJob: SupervisorJobImpl{Active}@3d24753a                 // CoroutineScope is still Active
+job1: "coroutine#2":StandaloneCoroutine{Completed}@59a6e353 // other coroutine in same CoroutineScope completed
+job2: "coroutine#3":StandaloneCoroutine{Cancelled}@7a0ac6e3 // exception occurred coroutine cancelled.
+test completed
+
+// End of Logs of above Test
+------------------------------
+    
+we use "SupervisorJob" to basically prevent the cascade of cancellation when one of the coroutines inside
+    a specific coroutineScope fails
+
+Since custom-exception-Handler is not assigned to CoroutineScope in the above code. only exception thrown 
+by one of child (coroutine#3) is cancelled. Exception is delegated to default android-exception-Handler
+and the other child of the same coroutineScope(coroutine#2) is completed sucessfully and the top-level-parent
+coroutineScope is still active at the end. Only the exception occurred coroutine is cancelled, because of 
+passing SuperVisorJob to the top-most-level coroutineScope.
+
+
+Assigning SuperVisorJob to the top-most-levele coroutineScope and with Custom-Exception-Handler.
+------------------------------------------------------------------------------------------------
+
+   @Test
+    fun uncaughtExceptionInConcurrentCoroutinesWithSupervisorJobAndExceptionHandler() {
+        runBlocking {
+            val coroutineExceptionHandler = CoroutineExceptionHandler { _, _ ->
+                println("Caught exception")
+            }
+            val scopeJob = SupervisorJob()
+            val scope = CoroutineScope(scopeJob + Dispatchers.Default + coroutineExceptionHandler)
+            val job1 = scope.launch {
+                delay(100)
+                println("inside coroutine")
+            }
+            val job2 = scope.launch {
+                delay(50)
+                throw RuntimeException()
+            }
+            joinAll(job1, job2)
+            println("scopeJob: $scopeJob")
+            println("job1: $job1")
+            println("job2: $job2")
+        }
+        Thread.sleep(100)
+        println("test completed")
+    }
+
+// Logs of above Test:
+-----------------------
+
+Caught exception                                              // exception handled by custom exception handler
+inside coroutine                                              // "coroutine#2" executes sucessfully
+scopeJob: SupervisorJobImpl{Active}@7a0ac6e3                  // top-most-scope is active at the end
+job1: "coroutine#2":StandaloneCoroutine{Completed}@71be98f5    // other child completed sucessfully
+job2: "coroutine#3":StandaloneCoroutine{Cancelled}@6fadae5d   // only exception raised coroutine is cancelled
+test completed
+
+// End of Logs of above Test
+------------------------------
+
+------------------------------------------------------------------------------------------------------------------
+									UNCAUGHT EXCEPTION IN ASYNC COROUTINE
+------------------------------------------------------------------------------------------------------------------
+	
+	Whenever we use Async coroutine builder, the uncaught exceptions that occur inside a async coroutine will 
+	not be probagate into coroutine exception handler and even it will not probagate into the coroutineScope. But
+	the cancellation of coroutine and coroutineScope and its children will still happen. the uncaught exception is rememberred by the coroutine-framework and this uncaught-exception is rethrown whenever we "await" on the deferred result returned by async coroutine call. 
+	when the async-coroutine(uncaught exception occurred) complete execution, if we "await" on the deferredResult
+	returned by async-coroutine. the await call will return the "uncaught-exception" thrown inside that "async-coroutine".
+
+	Where does the exception go if its not thrown outside the coroutine / its not probagated into the coroutineScope.
+
+	async coroutines will return a return-value as DeferredObject. Internally inside a async coroutine if a exception occur, the coroutine is simply cancelled and the coroutine will return a deferred-object. If we
+	do a "await" on the defferred object then the "exception(which occurred internally of a async coroutine) is thrown from the await call".
+
+	 fun uncaughtExceptionInConcurrentCoroutinesWithAsync() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + Dispatchers.Default)
+            val job1 = scope.launch {
+                delay(100)
+                println("inside coroutine")
+            }
+            val job2 = scope.async {
+                delay(50)
+                throw RuntimeException()  // uncaught exception thrown in async coroutuine, its not delegated
+            }                             // to coroutine-exceptionHandler or CoroutineScope. But its saved in
+            joinAll(job1, job2)           // deferredObject(return value of async coroutine). access ret val on
+            println("scopeJob: $scopeJob")          // deferredObject using "await" will throw exception which
+            println("job1: $job1")                 // can be handled using try-catch block
+            println("job2: $job2")
+        }
+        Thread.sleep(100)
+        println("test completed")
+    }
+
+
+// Logs of above Test:
+-----------------------
+
+scopeJob: JobImpl{Cancelled}@57829d67                          // top-most coroutineScope also cancelled
+job1: "coroutine#2":StandaloneCoroutine{Cancelled}@19dfb72a    // other child coroutine also cancelled
+job2: "coroutine#3":DeferredCoroutine{Cancelled}@17c68925      // async coroutine which trigerred uncaught exception
+test completed
+
+// End of Logs of above Test
+-----------------------
+
+
+@Test
+    fun uncaughtExceptionInConcurrentCoroutinesWithAsyncAndDeferred() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + Dispatchers.Default)
+            val job1 = scope.launch {
+                delay(100)
+                println("inside coroutine")
+            }
+            val deferred = scope.async<Int> {
+                delay(50)
+                throw RuntimeException("My EXCEPTION")
+            }
+            joinAll(job1, deferred)
+            println("scopeJob: $scopeJob")
+            println("job1: $job1")
+            println("job2: $deferred")
+            try {
+                val result = deferred.await()   // calling await() on deferredObject will throw uncaught-exception
+            } catch (e: Throwable) {                 // exception is handled using catch-clause
+                println("Caught exception: $e")       // still other child coroutines and coroutineScope will
+            }                                        // get cancelled
+        }
+        Thread.sleep(100)
+        println("test completed")
+    }
+
+// Logs of above Test:
+-----------------------
+
+
+scopeJob: JobImpl{Cancelled}@30c7da1e                        // top-most-coroutine will get cancelled
+job1: "coroutine#2":StandaloneCoroutine{Cancelled}@5b464ce8  // other child coroutine is cancelled
+job2: "coroutine#3":DeferredCoroutine{Cancelled}@57829d67         // coroutine cancelled cause of exception occur
+Caught exception: java.lang.RuntimeException: My EXCEPTION    // exception handled in catch block of await()
+test completed
+
+// End of Logs of above Test
+-----------------------
+
+
+ @Test
+    fun uncaughtExceptionInConcurrentCoroutinesWithAsyncAndDeferredAndSupervision() {
+        runBlocking {
+            val scopeJob = SupervisorJob()   // pass, supervisorJob will preven scope and other child to cancel
+            val scope = CoroutineScope(scopeJob + Dispatchers.Default)
+            val job1 = scope.launch {
+                delay(100)
+                println("inside coroutine")
+            }
+            val deferred = scope.async<Int> {
+                delay(50)
+                throw RuntimeException("My EXCEPTION")
+            }
+            joinAll(job1, deferred)
+            println("scopeJob: $scopeJob")
+            println("job1: $job1")
+            println("job2: $deferred")
+            try {
+                val result = deferred.await()      // calling await on deferred will expose uncaught-exception
+            } catch (e: Throwable) {              // exception is handled in catch-block
+                println("Caught exception: $e")
+            }
+        }
+        Thread.sleep(100)
+        println("test completed")
+    }
+
+// Logs of above Test:
+-----------------------
+
+
+inside coroutine                                   // other coroutine completed sucessfuly,cause supervisorJob
+scopeJob: SupervisorJobImpl{Active}@2acf57e3                  // coroutineScope is not cancelled,cause supervisorJob
+job1: "coroutine#2":StandaloneCoroutine{Completed}@506e6d5e // coroutine completed sucessfuly,cause supervisorJob
+job2: "coroutine#3":DeferredCoroutine{Cancelled}@96532d6    //coroutine cancelled,cause exception occurred
+Caught exception: java.lang.RuntimeException: My EXCEPTION  // exception handled
+test completed
+
+// End of Logs of above Test
+-----------------------
+------------------------------------------------------------------------------------------------------------------
+									BEST WAY TO HANDLE EXCEPTIONS IN COROUTINES
+------------------------------------------------------------------------------------------------------------------
+
+Its not always advised to use coroutine-exception-Handler. If we were able to indentify the possiblility of
+occurence of exception, its better to handle it locally using try-catch block rather allowing the exception to
+probagate all layers until it reach the caller. In activity/fragment, calling a use case(use-case has possibility
+to throw exception). Instead of handling the exception in the activity/fragment(its controller), handling of exception should happen in the business code itself(model), it has to be handled locally in the businesscode itself, instead of allowing the exception to probagate till the controller(activity/fragment).
+
+In some cases, when you use a thirdparty library, where you are unaware/dont have control over the client code. to define/handle exceptions locally. in such cases we can define kotlin-exception-handler to define a common area to handle all the occurred exceptions.
+
+------------------------------------------------------------------------------------------------------------------
+									EXCEPTIONS HANDLING SUMMARY
+------------------------------------------------------------------------------------------------------------------
+
+
+Exceptions in Launch coroutine builder:
+
+
+ExceptionHandler <---------------- coroutineScope  <------      
+								/  / (cancelled)          \
+							   /launch | |       \         \
+                      cancel  /  /     | |       launch     (cancellation probagated to)
+                probagated   /  / cancel launch    \         \
+                            /  /probagat |          \         \
+                           |   |       | |          |          \
+                           v   v       v v          v           \ 
+						coroutine1  coroutine2	coroutine3 (throws exception) 
+						                         (cancelled)  
+
+coroutineScope starts 3 coroutines using launch (coroutine1, coroutine2, coroutine3). coroutine3 emits a
+unhandled exception which inturn sends cancelSignal to coroutineScope, cancelSignal is sent to coroutine1 and 
+coroutine2 because of cancelSignal received by coroutineScope. also the exception is forwared to 
+coroutine-exception-Handler (if is available / set to the coroutineScope). If coroutine-exception-handler is not
+set, then exception is delegated to android-exception-handler which cause the app to crash.
+
+
+
+Exceptions in Async coroutine builder:
+
+
+								   coroutineScope  <------      
+								/  / (cancelled)          \
+							   /launch | |       \         \
+                      cancel  /  /     | |       async  (cancellation probagated to)
+                probagated   /  / cancel launch    \         \
+                            /  /probagat |          \         \
+                           |   |       | |          |          \
+                           v   v       v v          v           \ 
+						coroutine1  coroutine2	coroutine3 (throws exception) 
+						                         (cancelled)  
+
+coroutineScope starts 3 coroutines using async (coroutine1, coroutine2, coroutine3). coroutine3 emits a
+unhandled exception which inturn sends cancelSignal to coroutineScope, cancelSignal is sent to coroutine1 and 
+coroutine2 because of cancelSignal received by coroutineScope. also the exception is not delegated to 
+coroutine-exception-Handler (if is available / set to the coroutineScope). also exception is not delegated to android-exception-handler. 
+						Async builder will return a deferredobject as return value when we create a coroutine using 
+async coroutine builder. when we call the "await" on the deferredobject/job which cause the exception to be throw.
+we call deferredResult.await() to get the result of the async coroutine which cause to rethrow the occurred exception by coroutine-framework.
+
+
+
+SupervisorJob::::::: can install supervisorjobinto coroutinescope to prevent scope's cancellation when one of the child coroutine fails.
+
+
+Documentation ::::::: All potential thrown exceptions should be documented.
+
+The best way to handle exceptions in coroutines is to catch them locally and prevent their probagation to coroutinescope (when we have any function that throws exception, catch this exception locally at the point where this function is called and handle it there. Dont need to allow that exception to probagate up till coroutinescope and rely on coroutine-exception-handlerand supervisorjob). Bese place to handle exception is to handle it locally.
+

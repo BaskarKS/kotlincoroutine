@@ -1,0 +1,279 @@
+---------------------------
+Design with Coroutines:
+----------------------------
+
+Design of Concurrent Code:
+----------------------------
+
+ain Design rule of concurrent code in android : Presentation layer logic should use Ui thread exclusively.
+
+Presenation Layer Logic:
+	* 	Ui Logic (Views, CustomViews)
+	*	Android Controllers (Activities, Fragments)
+	*	Standalone controllers (controllers, presenters, ViewModel's)
+
+	""""""" NO MULTITHREADING IN THE ABOVE ENTITIES """""""
+
+Encapsulating Concurrency in Use Cases:
+----------------------------------------
+
+we can observe the below "DesignDemoFragment" uses executeBenchmark() which inturn uses Dispatchers.default
+which is not UI thread and it violates the concurrent code design.
+
+We have to extract it outside the presetation layer(DesignDemoFragment). Hence after extracting it we can
+very well confirm to best practices and confident that UI layer/ Presentation layer doesnt uses 
+concurrent code which uses other than MainThread.
+
+
+class DesignDemoFragment : BaseFragment() {
+
+    private val coroutineScope = CoroutineScope(Dispatchers.Main.immediate)
+
+    override val screenTitle get() = ScreenReachableFromHome.DESIGN_DEMO.description
+    
+
+    private lateinit var btnStart: Button
+    private lateinit var txtRemainingTime: TextView
+
+    private var hasBenchmarkBeenStartedOnce = false
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+    }
+
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
+        val view = inflater.inflate(R.layout.fragment_loop_iterations_demo, container, false)
+
+        txtRemainingTime = view.findViewById(R.id.txt_remaining_time)
+
+        btnStart = view.findViewById(R.id.btn_start)
+        btnStart.setOnClickListener {
+            logThreadInfo("button callback")
+
+            val benchmarkDurationSeconds = 5
+
+            coroutineScope.launch {
+                updateRemainingTime(benchmarkDurationSeconds)
+            }
+
+            coroutineScope.launch {
+                btnStart.isEnabled = false
+                val iterationsCount = executeBenchmark(benchmarkDurationSeconds)
+                Toast.makeText(requireContext(), "$iterationsCount", Toast.LENGTH_SHORT).show()
+                btnStart.isEnabled = true
+            }
+
+            hasBenchmarkBeenStartedOnce = true
+        }
+
+        return view
+    }
+
+   private suspend fun executeBenchmark(benchmarkDurationSeconds: Int) = withContext(Dispatchers.Default) {
+        logThreadInfo("benchmark started")
+
+        val stopTimeNano = System.nanoTime() + benchmarkDurationSeconds * 1_000_000_000L
+
+        var iterationsCount: Long = 0
+        while (System.nanoTime() < stopTimeNano) {
+            iterationsCount++
+        }
+
+        logThreadInfo("benchmark completed")
+
+        iterationsCount
+    }
+    override fun onStop() {
+        logThreadInfo("onStop()")
+        super.onStop()
+        coroutineScope.coroutineContext.cancelChildren()
+        if (hasBenchmarkBeenStartedOnce) {
+            btnStart.isEnabled = true
+            txtRemainingTime.text = "done!"
+        }
+    }
+
+
+    private suspend fun updateRemainingTime(remainingTimeSeconds: Int) {
+        for (time in remainingTimeSeconds downTo 0) {
+            if (time > 0) {
+                logThreadInfo("updateRemainingTime: $time seconds")
+                txtRemainingTime.text = "$time seconds remaining"
+                delay(1000)
+            } else {
+                txtRemainingTime.text = "done!"
+            }
+        }
+    }
+
+    private fun logThreadInfo(message: String) {
+        ThreadInfoLogger.logThreadInfo(message)
+    }
+
+    companion object {
+        fun newInstance(): Fragment {
+            return DesignDemoFragment()
+        }
+    }
+}
+
+Extracting the concurrent code outside this fragment into a Usecase (BenchmarkUseCase class). and 
+BenchmarkUseCase class is Injected into this fragment, functionlity is simply delegated to the
+use case, after this changes we can be sure that this fragment doesnt uses code which executes 
+other than "Main Thread". Afte doing the below refactoring, henceforth fragment doesnt know any code
+which use other than MainThread.
+
+
+class DesignDemoFragment : BaseFragment() {
+
+    private val coroutineScope = CoroutineScope(Dispatchers.Main.immediate)
+
+    override val screenTitle get() = ScreenReachableFromHome.DESIGN_DEMO.description
+
+    private lateinit var benchmarkUseCase: BenchmarkUseCase
+
+    private lateinit var btnStart: Button
+    private lateinit var txtRemainingTime: TextView
+
+    private var hasBenchmarkBeenStartedOnce = false
+
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        benchmarkUseCase = compositionRoot.benchmarkUseCase // BenchmarkUseCase object is injected here
+    }
+
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
+        val view = inflater.inflate(R.layout.fragment_loop_iterations_demo, container, false)
+
+        txtRemainingTime = view.findViewById(R.id.txt_remaining_time)
+
+        btnStart = view.findViewById(R.id.btn_start)
+        btnStart.setOnClickListener {
+            logThreadInfo("button callback")
+
+            val benchmarkDurationSeconds = 5
+
+            coroutineScope.launch {
+                updateRemainingTime(benchmarkDurationSeconds)
+            }
+
+            coroutineScope.launch {
+                btnStart.isEnabled = false
+                val iterationsCount = benchmarkUseCase.executeBenchmark(benchmarkDurationSeconds) // functionlity
+                Toast.makeText(requireContext(), "$iterationsCount", Toast.LENGTH_SHORT).show()  // is delegated
+                btnStart.isEnabled = true
+            }
+
+            hasBenchmarkBeenStartedOnce = true
+        }
+
+        return view
+    }
+
+    override fun onStop() {
+        logThreadInfo("onStop()")
+        super.onStop()
+        coroutineScope.coroutineContext.cancelChildren()
+        if (hasBenchmarkBeenStartedOnce) {
+            btnStart.isEnabled = true
+            txtRemainingTime.text = "done!"
+        }
+    }
+
+
+    private suspend fun updateRemainingTime(remainingTimeSeconds: Int) {
+        for (time in remainingTimeSeconds downTo 0) {
+            if (time > 0) {
+                logThreadInfo("updateRemainingTime: $time seconds")
+                txtRemainingTime.text = "$time seconds remaining"
+                delay(1000)
+            } else {
+                txtRemainingTime.text = "done!"
+            }
+        }
+    }
+
+    private fun logThreadInfo(message: String) {
+        ThreadInfoLogger.logThreadInfo(message)
+    }
+
+    companion object {
+        fun newInstance(): Fragment {
+            return DesignDemoFragment()
+        }
+    }
+}
+
+
+class BenchmarkUseCase {
+                          // code which runs on backgroud thread is extracted outinto a class as a usecase
+                          // this class encapsulates code which contains one single domain flow.
+                          
+                          // This benchmark uses Dispatchers.Default which is worker thread, and all these
+						  // information should be encapsulted into the usecases. External caller should not know
+						  // about the concurrency involved to execute the usecase, all of them should be
+						  // encapsulated into this class. This way of extracting into a usecase will be
+						  // helpful to resuse the code in other areas apart from fragment.
+
+    suspend fun executeBenchmark(benchmarkDurationSeconds: Int) = withContext(Dispatchers.Default) {
+        logThreadInfo("benchmark started")
+
+        val stopTimeNano = System.nanoTime() + benchmarkDurationSeconds * 1_000_000_000L
+
+        var iterationsCount: Long = 0
+        while (System.nanoTime() < stopTimeNano) {
+            iterationsCount++
+        }
+
+        logThreadInfo("benchmark completed")
+
+        iterationsCount
+    }
+
+
+    private fun logThreadInfo(message: String) {
+        ThreadInfoLogger.logThreadInfo(message)
+    }
+
+}
+
+
+
+---------------------------
+Design with Summary:
+----------------------------
+
+	* Main Design rule for concurrent code in Android: Presentation Layer logic should use UI Thread
+														Exclusively.
+    * To extract Multithreading logic from presentation layer logic, better to use "Usecase"						
+    	"UseCase classes"(also known as "Interactors") can encapsulate multithreaded flows.
+
+    														 	 Run only in
+    (If you use MVC architecture:)                                 Ui-Thread |
+                                                                             |
+    		ViewMvc(UiLogic)			Activity(Controller)		   		 |	UseCase(concurrent flows)
+                                                                             |
+	If we follow the below architecture change similar to MVC:               |
+		Controller shouldn't reference anything related to android framework |
+		Advantages: Stand alone contoller will be helpful for Unit test.     |
+                                                                             |
+    		ViewMvc(UiLogic)		Activity			Controller		     |	UseCase(concurrent flows)
+                                                                             |
+                                                                             |
+	                                                                         |
+    (If you use MVP architecture:)                                           |
+                                                                             |
+    		Activity			Presenter		   							 |	UseCase(concurrent flows)    		
+                                                                             |
+    	We put UI logic inside the activity, its dirty but still it works.   |
+    	Presenter: will contain logic which is decoupled from android        |
+    	           framework in that case it can be used for unit test cases.|
+                                                                             |
+                                                                             |
+    (If you use MVVM architecture: )                                         |
+                                                                             |
+    		Activity			ViewModel		   							 |	UseCase(concurrent flows)    	
+                                                                             |
+
+    	We put UI logic inside the activity/fragment, its dirty but still it works.

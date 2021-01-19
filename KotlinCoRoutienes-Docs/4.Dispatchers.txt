@@ -1,0 +1,243 @@
+Dispatchers are responsible for "dispatching" coroutines to the underlying threads, 
+
+Dispatchers will control the code which is inside a Coroutine on which threads the code is supposed to execute.
+
+Threads are independent concurrent tasks
+
+--------------------------------
+Standard Dispatchers in Android:
+--------------------------------
+
+1. Dispatchers.Main
+1. Dispatchers.Main
+1. Dispatchers.Main
+1. Dispatchers.Main
+2. Dispatchers.Main.immediate
+3. Dispatchers.Default
+4. Dispatchers.IO
+5. Dispatchers.unconfined
+
+1. Main Dispatcher:
+---------------------
+
+Dispatchers.Main executes code on the UI(main) thread of the android application
+
+Dispatchers.Main.immediate executes code on the UI(main) thread of the android application
+
+-----------------------------------------------
+Added benefit of "immediate" Main Dispatcher
+-----------------------------------------------
+Dispatchers.Main behaves like Handler (Looper.getMainLooper()).post(Runnable r).
+
+Dispatchers.Main.immediate behaves like Activity.runOnUiThread()
+
+Difference between the above 2 approaches
+
+   
+   public final void runOnUiThread(Runnable action) {
+        if (Thread.currentThread() != mUiThread) {
+            mHandler.post(action); // if the thread which calls this runOnUiThread() is not UiThread, then 
+                                   // post the function param "action" into the handler event queue, which 
+                                   // will be executed later by UiThread
+        } else {
+            action.run(); // if the thread which calls this runOnUiThread() is UiThread, then run the
+                          // function param "action" immediately
+        }
+
+Using Dispatchers.Main will always(even if the thread which execute the coroutine is UiThread) post the code inside the coroutine into the UiThread event queue, code will be executed later(only when the Uithread processing the event queue picks and execute the queue element).
+
+Hence using Dispatchers.Main.immediate is more performant, because if the thread which execute the coroutine
+is UiThread then it will get executed immediately. will not be posted into the UiThread event queue
+
+Advise to Use : Use Dispatchers.Main.immediate to execute code on UI thread, unless you have a reason not to
+
+
+
+2. Default and IO Dispatcher: (Backgroud Dispatchers)
+------------------------------
+
+Dispatchers.Default:
+	This dispatcher is backed by ThreadPool
+		ThreadPool with maxThreads = max(2, num_of_cpu_cores)
+		Used for computation intensive tasks
+
+Dispatchers.IO:
+		Dispatcher which supports upto 64 threads
+		ThreadPool with maxThreads = max(64, num_of_cpu_cores)
+
+		Maximum number of threads can be further increased by adjusting system properties.
+
+		Used for IO tasks (tasks which are mostly "waiting")
+
+		Mostly for network tasks, we take several milliseconds to send the request and wait much time
+		until the timeout for the response. We wait for the response during this time and the thread 
+		do nothing apart from waiting for the response, In this case we should use IO dispatchers 
+		because it supports more threads( >= 64). In this scenario if we try to use Dispatchers.Default
+		we could saturate the usage of maximum no of threads in the underlying threadpool of 
+		Dispatchers.Default (2). 
+
+		Older discussion says, coroutine do not "block", they "suspend". Still we can use much 
+		concurrent task under Dispatchers.Default. Operations do not block, they suspend. But still if you
+		have tasks that take longer time(network requests, database request, Integration with third party component
+		which take much time to provide response) to provide a response/computation then better to use 
+		Dispatchers.IO rather using Dispatchers.Default. Using Dispatchers.Default might work because of
+		"suspend" nature of operation but still it affect the responsiveness of the application because of
+		too much work on the Dispatchers.Default which has only 2 threads in their pool.
+
+
+2. Unconfined Dispatcher:
+-------------------------
+
+using Dispatchers.Unconfined, behaviour we analyze using a code
+
+override fun onStart() {
+	super.onStart()
+
+	val coroutineScope = CoroutineScope(Dispatchers.IO)
+
+	coroutineScope.launch {
+		println("scope default executes on ${threadName}")
+	}
+
+	coroutineScope.launch(Dispatchers.Default) {
+		println("default executes on ${threadName}")
+	}
+
+	coroutineScope.launch(Dispatchers.Main) {
+		println("main executes on ${threadName}")
+	}
+
+	coroutineScope.launch(Dispatchers.Unconfined) {
+		println("unconfined executes on ${threadName}")
+	}
+
+}
+
+Output prints:
+
+	*	scope default executes on DefaultDispatcher-worker-1
+	*	default executes on DefaultDispatcher-worker-2
+	*	unconfined executes on main
+	*	main executes on main
+
+Main observation in the above prints is that:: 
+unconfined executes on main thread and it preceeds/more priority than main thread execution
+
+
+	coroutineScope.launch {                                         //Dispatchers.IO
+		println("scope default executes on ${threadName}")
+	}
+
+	coroutineScope.launch(Dispatchers.Default) {				// Dispatchers.Default
+		println("default executes on ${threadName}")
+	}
+
+	eventhough the coroutineScope.launch{} is called from the Main Thread(means code executed
+	in OnStart() method which all code executes on Main Thread), code inside launch{} will
+	get executed in the respective Dispatchers worker thread.
+
+We can observe that coroutineScope.launch{} is called on the Main Thread which causes
+the unconfined to execute on the Main Thread itself. But it executed before
+coroutineScope.launch(Dispatchers.Main) {} because it executes immediately like the
+Dispatchers.Main.immediate (not posted into the main event queue).
+
+To analyse Dispatchers.unconfined gets kicked off from background thread, please look at
+the code below
+
+
+override fun onStart() {
+	super.onStart()
+
+	val coroutineScope = CoroutineScope(Dispatchers.IO)
+
+	Thread {     // background thread 
+		coroutineScope.launch(Dispatchers.Main.immediate) {
+			println("main immediate executes on ${threadName}")
+		}
+
+		coroutineScope.launch(Dispatchers.Unconfined) {
+			println("unconfined executes on ${threadName}")
+		}
+	}.start()
+
+}
+
+Output prints:
+
+	*	unconfined executes on Thread-5
+	*	main immediate executes on main
+
+"unconfined" immediately executes the defined code on the thread on which its called. In the above case
+we could observe the unconfined block of code completes execution on the background thread itself. while
+Dispatchers.Main.Immediate code will make the code block to be posted into the Main thread queue and then
+it executes later
+
+There is no reasonable use case for Dispatchers.unconfined in Android Applications.
+
+
+-----------------------------------------------------
+Best Dispatching Stratergy for Android Applications:
+-----------------------------------------------------
+
+	*	 To execute code on Ui Thread, use Dispatchers.Main.immediate
+	*	Unfortunately, background execution using "standard" CoroutineDispatchers is not straightforward
+
+		Dispatchers.Default:
+			This dispatcher is backed by ThreadPool
+				ThreadPool with maxThreads = max(2, num_of_cpu_cores) -- Why?
+				Used for computation intensive tasks -- Why?
+
+		Dispatchers.IO:
+			Dispatcher which supports upto 64 threads
+			ThreadPool with maxThreads = max(64, num_of_cpu_cores)  -- Why?
+
+			Maximum number of threads can be further increased by adjusting "system properties".  -- Why?
+
+			Used for IO tasks (tasks which are mostly "waiting") -- Why?
+
+"Java concurrency in practice" book by Brian Goetz
+
+concurrency optimization is a delicate and time-consuming process....
+
+To execute code in backgroud:: "" use single custom unbounded CoroutineDispatcher""
+
+
+BackgroundDispatcher.kt
+/**
+ * Background CoroutineDispatcher for Android applications which replaces both
+ * [Dispatchers.Default] and [Dispatchers.IO].
+ */
+
+object BackgroundDispatcher: CoroutineDispatcher() {
+
+    private val threadFactory = object: ThreadFactory {
+        private val threadCount = AtomicInteger(0)
+        private val nextThreadName get() = "BackgroundDispatcher-worker-${threadCount.incrementAndGet()}"
+
+        override fun newThread(runnable: java.lang.Runnable): Thread {
+            return Thread(runnable, nextThreadName)
+        }
+    }
+
+    private val threadPool = ThreadPoolExecutor(
+            3,
+            Integer.MAX_VALUE,
+            60L,
+            TimeUnit.SECONDS,
+            SynchronousQueue<Runnable>(),
+            threadFactory
+    );
+
+    private val dispatcher = threadPool.asCoroutineDispatcher()
+
+    override fun dispatch(context: CoroutineContext, block: Runnable) {
+        dispatcher.dispatch(context, block)
+    }
+
+    /**
+     * Background CoroutineDispatcher for Android applications which replaces both
+     * [Dispatchers.Default] and [Dispatchers.IO].
+     */
+    val Dispatchers.Background get() = BackgroundDispatcher
+
+}

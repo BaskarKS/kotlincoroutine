@@ -1,0 +1,1468 @@
+
+------------------------------------------------------------------------------------------------------------------
+									COROUTINE MECHANICS
+------------------------------------------------------------------------------------------------------------------
+							   Main Coroutine Building Blocks
+			----------------------------------------------------------------------
+
+"""" To make effecient and safe use of coroutines in complex scenarios you need to understand 
+	their underlying mechanics.""""
+
+Main Building Blocks of Coroutine:
+	1. Coroutine Scope.
+	2. Coroutine Context.
+	3. Coroutine Dispatcher.
+	4. Job
+
+In this section we learn about their respective roles and inter-relationships in details
+
+----------------------------------------------
+Part 1: Coroutine Scope and Coroutine Context:
+----------------------------------------------
+
+https://elizarov.medium.com/coroutine-context-and-scope-c8b255d59055
+
+    @Test
+    fun coroutineScope_launch() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob) // creating a coroutine scope with a empty job / empty context
+            scope.printCoroutineScopeInfo()
+            val job = scope.launch {             // this job will run in parallel
+                this.printCoroutineScopeInfo()
+                delay(100)
+                println("coroutine done")
+            }
+            job.join() 							// wait till the job is finished
+            println("test done")
+        }
+    }
+
+    fun CoroutineScope.printCoroutineScopeInfo() {
+        println()
+        println("CoroutineScope: $this")
+        println("CoroutineContext: ${this.coroutineContext}")
+        println("Job: ${this.coroutineContext[Job]}")         // prints Job in the context instance, access itkey: 														//  using Job instance, context is something similar
+        println()											//  to HashMap
+    }                                                      
+
+--------
+Output:
+--------
+ // details of created coroutineScope
+CoroutineScope: CoroutineScope(coroutineContext=JobImpl{Active}@45c8e616) // coroutinescope contains only context
+CoroutineContext: JobImpl{Active}@45c8e616                                // context contains only a job
+Job: JobImpl{Active}@45c8e616                                             // job details
+
+// details of launched coroutineScope
+CoroutineScope: "coroutine#2":StandaloneCoroutine{Active}@41a08135        // launch will create a new coroutine
+CoroutineContext: [CoroutineId(2), "coroutine#2":StandaloneCoroutine{Active}@41a08135, DefaultDispatcher]
+Job: "coroutine#2":StandaloneCoroutine{Active}@41a08135                   //  job details of launch coroutine
+
+coroutine done
+test done
+
+---------------------------------------------------------------------------------------------------------------------
+
+More or less CoroutineScope ~= Job and 
+CoroutineScope contains a context, and its referred by "coroutineContext".
+coroutineContext contains all the details can be referred similar to HashMap(Job details, Dispatcher details)
+
+
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob) // creating a coroutine scope with a empty job / empty context
+			scope.launch {             		//scope is different from the CoroutineScope inside the launch block
+                this.printCoroutineScopeInfo()
+                delay(100)
+                println("coroutine done")
+            }
+
+
+    scope contains coroutineContext=JobImpl{Active}@45c8e616, (scope only contains a coroutineContext element, and 
+    coroutineContext element contains only Job instance).
+
+    CoroutineScope inside the launch block contains "coroutine#2":StandaloneCoroutine{Active}@41a08135. (CoroutineScope inside the launch block only contains coroutineContext element, and 
+    coroutineContext element contains only Job instance)
+
+	Both the coroutine scope are totally different.
+
+	Job and Coroutine are kind of same. Each Coroutine will have a Job associated with it. When we 
+	launch a new coroutine using launch {} block, it immediately returns a job.  and the return Job will
+	represent the lauched coroutine. (each launched coroutine will have a Job) and that job ca be used
+	to wait for coroutine completion using "join()", to cancel the coroutine etc.
+
+	1.  Inside a coroutine a new coroutine scope is created and we should have new instance of the context is created inside. (everytime we create a new coroutinecontext we create a new coroutinescope. both are very
+	similar things and are almost identical). CoroutineScope is a srapper around the context.
+
+	Job corresponds to a coroutineSCope, If we dont provide one(passing empty, coroutine will create with in it by default.
+
+--------------------------------------------------------------------------------------------
+Part 2: Coroutine Mechanics,  CoroutineContext Elements:
+--------------------------------------------------------------------------------------------
+
+we can set the "descriptive name" for a coroutine using CoroutineName("my Descriptive name").
+
+We can add this along with the context which we pass when creating the CoroutineScope or "launch" a new
+coroutine like below code
+
+val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+
+or
+
+val job = scope.launch(CoroutineName("my coroutine") + Dispatchers.Default) { }
+
+
+// some more sample code
+
+    @Test
+    fun coroutineScope_launchAndChangeContext() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+            scope.printCoroutineScopeInfo()
+            val job = scope.launch() {  // this coroutine inherits the parent CoroutineScope name, Dispatcher and
+            											// few other elements but defines its own Job
+                this.printCoroutineScopeInfo()
+                delay(100)
+                println("coroutine done")
+            }
+            job.join()
+            println("test done")
+        }
+    }
+
+
+// not to inherit parent name and inner coroutine should have its own name
+
+    @Test
+    fun coroutineScope_launchAndChangeContext() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+            scope.printCoroutineScopeInfo()
+            val job = scope.launch(CoroutineName("my coroutine")) // inner new coroutine will have its own name
+            {                                                     // "my coroutine", it override parent name
+                this.printCoroutineScopeInfo()						// it inherits parent dispatcher(Dispatchers.IO)
+                delay(100)										  // context of this "my coroutine" is the inherited
+                println("coroutine done")                        // context of its parent(on which its launch), we
+            }                                                  // we can override the context elements if needed.
+            job.join()
+            println("test done")
+        }
+    }
+
+ // override the dispatcher of inner coroutine
+
+@Test
+    fun coroutineScope_launchAndChangeContext() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+            scope.printCoroutineScopeInfo()
+            val job = scope.launch(CoroutineName("my coroutine") + Dispatchers.Default) { // override different 
+                this.printCoroutineScopeInfo()                                             // name and Dispatcher 
+                delay(100)
+                println("coroutine done")
+            }
+            job.join()
+            println("test done")
+        } 
+
+
+"Name of Scope" will be same as "name of the Job".
+
+We can specify individual elements of the context (Scope, CoroutineName, Dispatcher, Id), 
+whenever we launch a new coroutine on a scope, it inherits elements from the scope Context and still we
+can override some elements of the context (Scope, CoroutineName, Dispatcher, Id), but it creates its own new 
+job. 
+
+CoroutineScope and CoroutineContext are kind of same thing. Whenever we override the elements of
+context we also override the elements of the Scope. By override of the launch coroutine we kind of control
+the internal launched scope. we can even override and define our own job in the launched coroutine
+which have some interesting consequences which we discuss later on course. 
+
+
+coroutine Id of the inner coroutines is automatically assigned by the framework, better not to change
+it. These Id's are in incremental sequences which will be helpful to see the order of coroutines started
+For better debug and tracking, give descriptive names to CoroutineName.
+
+CoroutineContext contains quite a bit of elements , we can override most of them and whenever we launch a
+new coroutine on a Scope, then this coroutine will inherit context elements from the scope itself except for
+some of them (it will have standalone coroutineId, standalone coroutine job). It will inherit dispatcher, Coroutine
+name and various other context elements. 
+
+
+// Logs
+
+CoroutineScope: CoroutineScope(coroutineContext=[JobImpl{Active}@66d33a, CoroutineName(outer scope), LimitingDispatcher@7cf10a6f[dispatcher = DefaultDispatcher]])
+CoroutineContext: [JobImpl{Active}@66d33a, CoroutineName(outer scope), LimitingDispatcher@7cf10a6f[dispatcher = DefaultDispatcher]]
+Job: JobImpl{Active}@66d33a
+
+
+CoroutineScope: "my coroutine#2":StandaloneCoroutine{Active}@3c2449f3
+CoroutineContext: [CoroutineName(my coroutine), CoroutineId(2), "my coroutine#2":StandaloneCoroutine{Active}@3c2449f3, DefaultDispatcher]
+Job: "my coroutine#2":StandaloneCoroutine{Active}@3c2449f3
+
+coroutine done
+test done
+
+--------------------------------------------------------------------------------------------
+Part 3: Coroutine Mechanics,  WithContext Function:
+--------------------------------------------------------------------------------------------
+
+WithContext is a suspending call, 
+
+scope.launch { } will launch/start a new coroutine with the context of the scope invoked and inside
+the coroutine it has its own coroutine-scope and context params inherit from the launched scope and 
+it has its own job.
+
+ val job = scope.launch(CoroutineName("my coroutine") + Dispatchers.Default) {
+ 				// coroutine scope inside this launch block will be parent of withContext
+                this.printCoroutineScopeInfo()
+                delay(100)
+                withContext(CoroutineName("withContext") + Dispatchers.IO) {
+                    this.printCoroutineScopeInfo()
+                    delay(100)
+                    println("withContext done")
+                }
+                println("coroutine done")
+            }
+
+we can switch context using withContext(){}, to withContext we can provide alternative context elements
+and the provided elements will replace the inherit elements provided to the withContext() from its
+parent coroutine scope(coroutine scope inside this launch block will be parent of withContext). 
+
+withContext(){} funtion modifies the context(creates a new context). Context ~= Scope, when we modify
+or create a new context that creates a new coroutine-scope. Therefore withContext(){} will run in a new
+coroutine-scope, this coroutine scope also has a job, this job doesnt correspond to a new coroutine.
+This new job created by withContext(){} still runs on parent coroutine(scope.launch{}). 
+
+Every coroutine has a corresponding job, but not every job corresponds to new coroutine(like job
+created on withContext(){}). 
+
+coroutine is some kind of abstraction, within that it can contain multiple jobs. 
+
+Here we have outer scope, using that
+we launch a new coroutine, within itself create a job, new context, new coroutine scope
+which in that new coroutine, we use withContext(){} which within itself creates new context, coroutinescope
+									                                                         new job.
+all above line works sequentially, in structurred concurrency
+
+Summary:
+	what withContext(){} does?
+		It modifies coroutine context, creates new coroutine context, overrides passed elements, and therefore
+		creates a new coroutine scope. whatever code we execute with in the withContext(){} block it will
+		be executed in the scope of the newly created coroutine-scope and newly associated job. The code will
+		still work under the same coroutine which uses this withContext(){} block. (can be verified with the
+		coroutineId's). withContext(){} doesnt create new coroutine. 
+
+		Therefore, all code is under a single coroutine scope, structurred concurrency is available to code inside coroutine and code inside withContext(){} block.
+
+// Test Code
+
+
+    @Test
+    fun coroutineScope_withContext() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+            scope.printCoroutineScopeInfo()
+            val job = scope.launch(CoroutineName("my coroutine") + Dispatchers.Default) {
+                this.printCoroutineScopeInfo()
+                delay(100)
+                withContext(CoroutineName("withContext") + Dispatchers.IO) {
+                    this.printCoroutineScopeInfo()
+                    delay(100)
+                    println("withContext done")
+                }
+                println("coroutine done")
+            }
+            job.join()
+            println("test done")
+        }
+    }
+
+// Logs
+
+CoroutineScope: CoroutineScope(coroutineContext=[JobImpl{Active}@66d33a, CoroutineName(outer scope), LimitingDispatcher@7cf10a6f[dispatcher = DefaultDispatcher]])
+CoroutineContext: [JobImpl{Active}@66d33a, CoroutineName(outer scope), LimitingDispatcher@7cf10a6f[dispatcher = DefaultDispatcher]]
+Job: JobImpl{Active}@66d33a
+
+
+CoroutineScope: "my coroutine#2":StandaloneCoroutine{Active}@247a9705
+CoroutineContext: [CoroutineName(my coroutine), CoroutineId(2), "my coroutine#2":StandaloneCoroutine{Active}@247a9705, DefaultDispatcher]
+Job: "my coroutine#2":StandaloneCoroutine{Active}@247a9705
+
+
+CoroutineScope: "withContext#2":DispatchedCoroutine{Active}@7f9c1075
+CoroutineContext: [CoroutineId(2), CoroutineName(withContext), "withContext#2":DispatchedCoroutine{Active}@7f9c1075, LimitingDispatcher@7cf10a6f[dispatcher = DefaultDispatcher]]
+Job: "withContext#2":DispatchedCoroutine{Active}@7f9c1075
+
+withContext done
+coroutine done
+test done
+
+
+
+--------------------------------------------------------------------------------------------
+Part 4: Coroutine Mechanics,  Jobs Hierarchy:
+--------------------------------------------------------------------------------------------
+
+in our example we create a job called "scopeJob" expilcitly and pass it as param to create a 
+coroutineScope
+
+        val scopeJob = Job()
+        val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+
+we launch a new coroutine using the scope, which will return a new Job
+
+		val job = scope.launch(CoroutineName("my coroutine") + Dispatchers.Default) {
+				  }
+
+internally with in the launch we use a withContext(){} block, which doesnt return a job,
+but creates a different Job internally.
+
+Whats the relation between these jobs, does they have a relation / connection between them.
+
+we create a test utils function which will do a depth-first traversal and investigate the jobs
+relation and print the child jobs of the current job
+
+    fun printJobsHierarchy(job: Job, nestLevel: Int = 0) {
+        val indent = "    ".repeat(nestLevel) 		 // this is just space, repeater (based on nestLevel)
+        println("$indent- $job")              			// append space before the job name
+        for (childJob in job.children) {                            // DFS of the childjob of current job
+            printJobsHierarchy(childJob, nestLevel + 1)            // recursive call to navigate in depth
+        }
+        if (nestLevel == 0) {                                     
+            println()
+        }
+    }
+
+
+to view the all above mentioned jobs hierarchy, we call the above helper method by passing in the
+top job.
+
+
+    @Test
+    fun coroutineScope_jobsHierarchy() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+            scope.printCoroutineScopeInfo()
+            val job = scope.launch(CoroutineName("my coroutine") + Dispatchers.Default) {
+                this.printCoroutineScopeInfo()
+                delay(100)
+                withContext(CoroutineName("withContext") + Dispatchers.IO) {
+                    this.printCoroutineScopeInfo()
+                    delay(100)
+                    printJobsHierarchy(scopeJob)                      // passing the top job / top parent job
+                    println("withContext done")
+                }
+                println("coroutine done")
+            }
+            job.join()
+            println("test done")
+        }
+    }
+
+// Logs of the above code
+
+CoroutineScope: CoroutineScope(coroutineContext=[JobImpl{Active}@19bb089b, CoroutineName(outer scope), LimitingDispatcher@4563e9ab[dispatcher = DefaultDispatcher]])
+CoroutineContext: [JobImpl{Active}@19bb089b, CoroutineName(outer scope), LimitingDispatcher@4563e9ab[dispatcher = DefaultDispatcher]]
+Job: JobImpl{Active}@19bb089b
+
+
+CoroutineScope: "my coroutine#2":StandaloneCoroutine{Active}@1140cf7b
+CoroutineContext: [CoroutineName(my coroutine), CoroutineId(2), "my coroutine#2":StandaloneCoroutine{Active}@1140cf7b, DefaultDispatcher]
+Job: "my coroutine#2":StandaloneCoroutine{Active}@1140cf7b
+
+
+CoroutineScope: "withContext#2":DispatchedCoroutine{Active}@52f45af0
+CoroutineContext: [CoroutineId(2), CoroutineName(withContext), "withContext#2":DispatchedCoroutine{Active}@52f45af0, LimitingDispatcher@4563e9ab[dispatcher = DefaultDispatcher]]
+Job: "withContext#2":DispatchedCoroutine{Active}@52f45af0
+
+- JobImpl{Active}@19bb089b                                                               // top parent job
+    - "my coroutine#2":StandaloneCoroutine{Active}@1140cf7b               	// childA is child of top parent job
+        - "withContext#2":DispatchedCoroutine{Active}@52f45af0              // childB is child of childA
+
+withContext done
+coroutine done
+test done
+
+
+// end of logs
+
+"scopeJob" and "job" and job of withContext(){} for a hierarchy. (most fundamental aspect of coroutine
+jobs hierarchy). 
+	1. This hierarchy allows coroutines to implement structured concurrency.
+	2. It is this hierarchy allows probagation of cancellation of JOBS.
+	3. Its this hierarchy allows coroutines to handle error handling.
+	4. Its this hierarchy allows coroutines framework to work.
+
+When we use coroutines we create jobs, we also establish a very specific hierarchy between jobs
+(parent - child realtionship). (Eg: outerScopeJob (scopeJob) is parent of coroutineJob (job) and 
+coroutineJob (job) is the parent of the job created inside withContext(){}.)
+
+To look into deeper details, we try creating a coroutine using launch{} with the outerScope("scope" in code)
+which will execute in parallel with the coroutine defined above it. both the coroutines will run in parallel
+
+            val job = scope.launch(CoroutineName("my coroutine") + Dispatchers.Default) {
+                this.printCoroutineScopeInfo()
+                delay(100)
+                withContext(CoroutineName("withContext") + Dispatchers.IO) {
+                    this.printCoroutineScopeInfo()
+                    delay(100)
+                    printJobsHierarchy(scopeJob)
+                    println("withContext done")
+                }
+                println("coroutine done")
+            }
+            scope.launch(CoroutineName("my additional coroutine")) {    // defined outside of above launch
+                			                                           // block, hence it run in parallel to
+            }                                                          // to above defined coroutine
+
+
+If the new coroutine is launched with in the block of above defined coroutine then the new defined
+coroutine will follow "structured concurrency" of the outer coroutine
+
+            val job = scope.launch(CoroutineName("my coroutine") + Dispatchers.Default) {
+                this.printCoroutineScopeInfo()
+                delay(100)
+                withContext(CoroutineName("withContext") + Dispatchers.IO) {
+                    this.printCoroutineScopeInfo()
+                    delay(100)
+                    printJobsHierarchy(scopeJob)
+                    println("withContext done")
+                }
+                println("coroutine done")
+
+                scope.launch(CoroutineName("my additional coroutine")) { // defined with-in follow
+                				                                         //structured concurrency
+                }
+            }
+
+we launch the new coroutine ouside the above coroutine block, which will execute in parallel to the above
+defined coroutine. Also we want the new coroutine to be alive when the above coroutine block investigates
+the jobs hierarchy(hence we delay it with more time so it will stay alive when above coroutine checks
+jobs hierarchy).
+
+    @Test
+    fun coroutineScope_jobsHierarchy() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+            scope.printCoroutineScopeInfo()
+            val job = scope.launch(CoroutineName("my coroutine") + Dispatchers.Default) {
+                this.printCoroutineScopeInfo()
+                delay(100)
+                withContext(CoroutineName("withContext") + Dispatchers.IO) {
+                    this.printCoroutineScopeInfo()
+                    delay(100)
+                    printJobsHierarchy(scopeJob)
+                    println("withContext done")
+                }
+                println("coroutine done")
+            }
+            scope.launch(CoroutineName("my additional coroutine")) {
+                delay(500)
+            }
+            job.join()
+            println("test done")
+        }
+
+////// Logs of above code //////
+
+CoroutineScope: CoroutineScope(coroutineContext=[JobImpl{Active}@19bb089b, CoroutineName(outer scope), LimitingDispatcher@4563e9ab[dispatcher = DefaultDispatcher]])
+CoroutineContext: [JobImpl{Active}@19bb089b, CoroutineName(outer scope), LimitingDispatcher@4563e9ab[dispatcher = DefaultDispatcher]]
+Job: JobImpl{Active}@19bb089b
+
+
+CoroutineScope: "my coroutine#2":StandaloneCoroutine{Active}@690d15f8
+CoroutineContext: [CoroutineName(my coroutine), CoroutineId(2), "my coroutine#2":StandaloneCoroutine{Active}@690d15f8, DefaultDispatcher]
+Job: "my coroutine#2":StandaloneCoroutine{Active}@690d15f8
+
+
+CoroutineScope: "withContext#2":DispatchedCoroutine{Active}@46260db3
+CoroutineContext: [CoroutineId(2), CoroutineName(withContext), "withContext#2":DispatchedCoroutine{Active}@46260db3, LimitingDispatcher@4563e9ab[dispatcher = DefaultDispatcher]]
+Job: "withContext#2":DispatchedCoroutine{Active}@46260db3
+
+- JobImpl{Active}@19bb089b                                                    // top parent job
+    - "my coroutine#2":StandaloneCoroutine{Active}@690d15f8                   // job of above defined coroutine
+        - "withContext#2":DispatchedCoroutine{Active}@46260db3                // withcontext job of above coroutine
+    - "my additional coroutine#3":StandaloneCoroutine{Active}@47cc4be8        // job of below defined coroutine   
+
+withContext done
+coroutine done
+test done
+
+////// End of logs //////////
+	from logs we can observe the above defined coroutine ID and withContext(){} ID are same. below defined
+	coroutine Id is different and Id's are generated & defined & assigned by the framework.
+
+when we use coroutines we establish relationship between different jobs (parent-child relationship).
+Therefore when we use coroutine's the jobs will form a "tree" (	"withContext#2" is the job and its child of "my coroutine#2" job. "my coroutine#2" and "my additional coroutine#3" are jobs and children of parent job (scopeJob))
+
+
+--------------------------------------------------------------------------------------------
+Part 5: Coroutine Mechanics,  Cancellation Probagation:
+--------------------------------------------------------------------------------------------
+
+jobs hierarchy plays important role in "jobs cancellation probagation".
+
+@Test
+    fun coroutinesCancellationMechanics() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+            val job = scope.launch(CoroutineName("my coroutine") + Dispatchers.Default) {    	=====> coroutine-1
+                delay(100)
+                withContext(CoroutineName("withContext") + Dispatchers.IO) {
+                    printJobsHierarchy(scopeJob)
+                    delay(100)                             // when execution is in this line, parent is cancelled
+                    println("withContext done")                 // this line is not executed
+                }
+                println("coroutine done")                      // this line is not executed
+            }
+            scope.launch(CoroutineName("my additional coroutine")) {                            =====> coroutine-2
+                delay(150)
+                scope.cancel()
+            }
+            job.join()
+            println("test done")
+        }
+    }
+
+From parent coroutine (scopeJob) we launch coroutine-1 and coroutine-2.
+Both the coroutine(coroutine-1 and coroutine-2) will start executing concurrently, because both are different coroutines. when the execution is in middle of coroutine-1, we call cancel() on the parent from coroutine-2 which will cancel both the child coroutines (coroutine-1 and coroutine-2).
+
+In above code, inside coroutine-2 we cancel() on the scopeJob which is the parent of coroutine-1 and coroutine-2.
+we call cancel() on the parent in such a way that, when the execution is happenning inside coroutine-1 withContext(){delay(100)}.
+Hence both the children(coroutine-1 and coroutine-2) of parent(scopeJob) is cancelled when cancel() on parent is called.
+
+
+when cancel() is called on the parent, all childrens of the parent will receive cancellationException
+to understand the probagation of CancellationException to all children of the parent. we wrap the code in try-catch
+block to understand the probagation.
+
+@Test
+    fun coroutinesCancellationMechanics() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+            val job = scope.launch(CoroutineName("my coroutine") + Dispatchers.Default) {
+                try {
+                    delay(100)
+                    withContext(CoroutineName("withContext") + Dispatchers.IO) {
+                        try {
+                            printJobsHierarchy(scopeJob)
+                            delay(100)
+                            println("withContext done")
+                        } catch (e: CancellationException) {
+                            println("withContext cancelled")
+                        }
+                    }
+                    println("coroutine done")
+                } catch (e: CancellationException) {
+                    println("coroutine cancelled")
+                }
+            }
+            scope.launch(CoroutineName("my additional coroutine")) {
+                delay(150)
+                scope.cancel()
+            }
+            job.join()
+            println("test done")
+        }
+    }
+
+    // Logs of the above code
+
+    - JobImpl{Active}@6b6b600a
+    - "my coroutine#2":StandaloneCoroutine{Active}@4e8cfca6
+        - "withContext#2":DispatchedCoroutine{Active}@62689646
+    - "my additional coroutine#3":StandaloneCoroutine{Active}@79499ce1
+
+	withContext cancelled
+	coroutine cancelled
+	test done
+
+	// end of logs
+
+
+// Logs of the above code
+
+- JobImpl{Active}@84ff4a
+    - "my coroutine#2":StandaloneCoroutine{Active}@35ff1139
+        - "withContext#2":DispatchedCoroutine{Active}@218de2b4
+    - "my additional coroutine#3":StandaloneCoroutine{Active}@51557347
+
+test done
+
+// End of Logs
+
+
+Cancellation Mechanics: Cancellation signal travels down the hierarchy of jobs, but the cancellation of jobs 
+						travels up the hierarchy from the lowes leaf child .
+
+
+to understand the cancellationException navigation inside the child hierarchy, we wrap the code
+in try-catch block and call cancel on the parent job.
+
+ @Test
+    fun coroutinesCancellationMechanics() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+            val job = scope.launch(CoroutineName("my coroutine") + Dispatchers.Default) {            // coroutine-1
+                try {
+                    delay(100)
+                    withContext(CoroutineName("withContext") + Dispatchers.IO) {
+                        try {
+                            printJobsHierarchy(scopeJob)
+                            delay(100)                       // delay() will throw cancellationException when 
+                            println("withContext done")                            // cancel() on Job called.
+                        } catch (e: CancellationException) {
+                            println("withContext cancelled")       // we handle the exception, we dont rethrow it
+                        }
+                    }                                        // on entry and exit of withContext(){} block,
+                    println("coroutine done")                // cancellationException is called when cancel() is
+                } catch (e: CancellationException) {         // called on the job which execute this withContext
+                    println("coroutine cancelled")           // block.
+                }
+            }
+            scope.launch(CoroutineName("my additional coroutine")) {                               // coroutine-2
+                delay(150)
+                scope.cancel()  // this line is triggered when the above coroutine is in middle of delay(100)
+            }                                                            // which is in withContext(){}
+            job.join()
+            println("test done")
+        }
+    }
+
+    // Logs below,
+
+    - JobImpl{Active}@3b8ef538
+	    - "my coroutine#2":StandaloneCoroutine{Active}@3db4534a
+	        - "withContext#2":DispatchedCoroutine{Active}@5fb28125
+	    - "my additional coroutine#3":StandaloneCoroutine{Active}@5c6557a0
+
+	withContext cancelled // this line printed proves that CancellationException handled in withContext block 
+	coroutine cancelled // this line printed proves that CancellationException is not thrown by withContext block
+	test done
+
+	// End of Logs
+
+	Analysis: we cancelled the top level job/scope, which is the source of launching coroutine-1 and coroutine-2.
+	we cancel the outermost or top-level job, but CancellationException is thrown from the deepest child(withContext(){}) to outer.
+
+	how the information of the cancellation probagates from the top-level coroutine scope (scopeJob) to the 
+	delay(100) (which is defined in withContext(){}). 
+		the probagation is possible because of the Jobs-Hierarchy.
+
+	from logs we can see the hierarchy of jobs
+
+	- JobImpl{Active}@3b8ef538                                              ------> Top Level Job
+	    - "my coroutine#2":StandaloneCoroutine{Active}@3db4534a             ------> child-1 of top level job
+	        - "withContext#2":DispatchedCoroutine{Active}@5fb28125          	------> child of child-1 job  
+	    - "my additional coroutine#3":StandaloneCoroutine{Active}@5c6557a0  ------> child-2 of top level job
+
+	when we cancel the top level job, the cancellation signal will probagate deep down into its child. Here
+	cancellation signal probagate from 
+
+	JobImpl{Active}@3b8ef538 -> "my coroutine#2" -> "withContext#2" -> no more child to probagate
+	delay(100) inside "withContext#2" will throw the CancellationException which is handles inside
+	"withContext#2" and it breaks out of "withContext#2"
+
+	CancellationException is thrown inside "my coroutine#2" and its handled( inside catch()) in the
+	"my coroutine#2". cancellationException is not probagate outside "my coroutine#2". because the top of
+	hierarchy is reached. Hence the cancellationException thrown inside "my coroutine#2" doesnt probagate outside
+	"my coroutine#2". CancellationException doesnt probagate outside the top level coroutine ("my coroutine#2"),
+
+***************************************
+	Note: 
+	We call cancel() on the top level scope in the above code(scope.cancel()). 
+
+	The important point to note is, calling cancel() on the topLevel coroutineScope is not important. Rather the important point is the TopLevel-Job (associated with the top-level scope). which is the important factor which takes the cancellation signal from the top-job to the deep-down child. 
+
+	To verify that the top-level job is the	important element which takes the cancellation signal deep-down child. we call cancel() on the topLevel-job(scopeJob.cancel()), instead of calling cancel() on top-level scope(scope.cancel()). Cancellation signal still probagates from the top-job to the deep-down child, then CancellationException is thrown from the deep-down child to above hierarchy.
+
+	Cancellation Scheme in coroutine is based on Jobs form Hierarchy. we can pass the cancellation signal from
+	higher level job to all its children, childrens will cancel the job from the (bottom-most / leaf node / 
+	deepest child) in the hierarchy to te upper-most parent.
+
+	@Test
+    fun coroutinesCancellationMechanics() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+            val job = scope.launch(CoroutineName("my coroutine") + Dispatchers.Default) {
+                try {
+                    delay(100)
+                    withContext(CoroutineName("withContext") + Dispatchers.IO) {
+                        try {
+                            printJobsHierarchy(scopeJob)
+                            delay(100)
+                            println("withContext done")
+                        } catch (e: CancellationException) {
+                            println("withContext cancelled")
+                        }
+                    }
+                    println("coroutine done")
+                } catch (e: CancellationException) {
+                    println("coroutine cancelled")
+                }
+            }
+            scope.launch(CoroutineName("my additional coroutine")) {
+                delay(150)
+                scopeJob.cancel()                                                 // calling cancel() of top-job
+            }
+            job.join()
+            println("test done")
+        }
+
+    // Logs
+
+    - JobImpl{Active}@3b8ef538
+	    - "my coroutine#2":StandaloneCoroutine{Active}@3db4534a
+	        - "withContext#2":DispatchedCoroutine{Active}@5fb28125
+	    - "my additional coroutine#3":StandaloneCoroutine{Active}@5c6557a0
+
+	withContext cancelled
+	coroutine cancelled
+	test done
+
+	//End of Logs
+
+***************************************
+
+In code we can observe the cancellationException throw by delay(100) inside withContext(){} is caught and 
+handled inside  withContext(){}. But still cancellationException is thrown inside coroutine-1 ("my coroutine#2").
+
+who initiated the cancellationException that is thrown inside  coroutine-1 ("my coroutine#2")??????
+
+Its because of the scoping functions( withContext(){}) in coroutine-framework. These scoping function will
+check the status(alive) of the parent coroutine when they begin executing and also at the end/exit of scoping function. If the parent coroutine is cancelled/inactive then this scoping function will throw CancellationException.
+
+withContext defined inside (coroutine-1 ("my coroutine#2")), when it begin/exits executing it checks for the
+withContext(){} executing coroutine (coroutine-1 ("my coroutine#2")), the status of the coroutine is alive or not(if its (not-alive / cancelled)) then withContext(){} will throw CancellationException.
+
+In our case, when withContext(){} executing exits, it checks the status of the parent coroutine (coroutine-1 ("my coroutine#2")) is inactive/not-alive/cancelled. Since its cancelled, withContext(){} will throw CancellationException which should be handled inside the (coroutine-1 ("my coroutine#2")).
+
+
+The above analysis clearly shows, the jobs hierarchy is the one which really powers the cancellation mechanics of coroutines, cancellation signal is probagated from the higher-level jobs to lower-level jobs and then the CancellationException / CancellationAction is probagated back from lower-level jobs to higher-level jobs. (i.e: provided on fact that we have/maintain such job hierarchy).
+
+i.e: Logs which shows the hierarchy of Jobs: 							   // cancellation  // cancellation
+                                                                           //    signal     //  Exception
+
+- JobImpl{Active}@3b8ef538                                                         V                ^
+   - "my coroutine#2":StandaloneCoroutine{Active}@3db4534a                         V                ^
+      - "withContext#2":DispatchedCoroutine{Active}@5fb28125                       V                ^
+   - "my additional coroutine#3":StandaloneCoroutine{Active}@5c6557a0
+
+withContext cancelled
+coroutine cancelled
+test done	
+
+
+--------------------------------------------------------------------------------------------
+Part 6: Coroutine Mechanics,  NonCancellable Vs Job:
+--------------------------------------------------------------------------------------------
+
+Goal: How "Noncancellable" comes in play with "Jobs-Hierarchy" and How it affects the Cancellation Probagation
+		inside the jobs tree.
+
+// From Logs, we explore the Jobs Hierarchy
+
+- JobImpl{Active}@3b8ef538                                            // OUTERMOST / top-most-job
+  - "my coroutine#2":StandaloneCoroutine{Active}@3db4534a            //coroutine-1 / child-1 of top-most-job
+    - "withContext#2":DispatchedCoroutine{Active}@5fb28125           // deep-child-1 of child-1
+  - "my additional coroutine#3":StandaloneCoroutine{Active}@5c6557a0 //(coroutine-2 / child-2 of top most job
+                                                                        responsible to cancel() top-most-job
+
+// top-most-job is cancelled in coroutine-2, while coroutine-1 is active and control is at delay(100) of withContext
+withContext cancelled // withContext cancelled cause of CancellationException caused by delay(100)
+coroutine cancelled   // coroutine-1 cancelled cause of CancellationException caused by exit of withContext(){}
+test done	
+
+
+now, we introduce NonCancellable to withContext(){}, which will empower withContext(){} to continue execution
+of the entire withContext(){} block without being interruppted by cancellationSignal / cancellationException when
+the parent coroutine of withContext(){} is cancelled. Code inside the withContext(){} is not interruped in the
+middle because of the top-most scope/Job cancellation.
+
+after introducing NonCancellable in withContext(){}, we analyse the logs to see Jobs-Hierarchy
+
+@Test
+    fun coroutinesCancellationMechanicsNonCancellable() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+            val job = scope.launch(CoroutineName("my coroutine") + Dispatchers.Default) {
+                try {
+                    delay(100)
+                    withContext(NonCancellable + CoroutineName("withContext") + Dispatchers.IO) {  
+                        try {
+                            printJobsHierarchy(scopeJob)
+                            delay(100)
+                            println("withContext done")
+                        } catch (e: CancellationException) {
+                            println("withContext cancelled")
+                        }
+                    }
+                    println("coroutine done")
+                } catch (e: CancellationException) {
+                    println("coroutine cancelled")
+                }
+            }
+            scope.launch(CoroutineName("my additional coroutine")) {
+                delay(150)
+                scopeJob.cancel()
+            }
+            job.join()
+            println("test done")
+        }
+    }
+
+
+// Logs of above code
+
+- JobImpl{Active}@2665ffb                                                      // top-most-job
+	- "my coroutine#2":StandaloneCoroutine{Active}@4f303117                    // -- coroutine-1
+    - "my additional coroutine#3":StandaloneCoroutine{Active}@7ecb7a7e         // -- coroutine-2
+
+withContext done             // withContext is not interrupted with CancellationException, it completes properly
+coroutine cancelled
+test done
+
+// End of Logs
+
+we can observe that, introducing NonCancellable in withContext(){}. Hierarchy of Jobs changed.
+we can now see that withCOntext(){} is not a child-job of coroutine-1 and now withContext(){} is not 
+a part of the jobs-Hierarchy.
+
+Since we pass the NonCancellable job into the withContext(){} which replaces the default job that in
+passed/inherited from its parent/ outer-scope job Hierarchy.
+
+By injecting/passing NonCancellable into the withContext(){} , we broke the Jobs hierarchy. Now theres 
+nolonger parent-child job relationship between withContext(){} and coroutine-1 and top-most-job. Hence we
+cannot probagate the cancellationSignal into the withContext(){} block because of the jobs hierarchy disconnectivity.
+
+Passing NonCancellable job into the WithContext(){} has no effect on the coroutine-1 ("my coroutine#2"),
+we can see the "my coroutine#2" is cancelled because of cancel() called on the top-most-job. It doesnt matter
+of breaking of job hierarchy by passing NonCancellable into the withContext(){}, still withContext(){} will
+fire CancellationException on its exit because of its scope of the coroutine in which it is contained is cancelled.
+Hence coroutine-1 ("my coroutine#2") receives CancellationException because of the withContext(){} fires it on its block completion.
+
+NonCancellable will breaks the Jobs-Hierarchy, so that the cancellationSignal will not be probagated into
+the code-block(withContext(){}) on which NonCancellable is passed which will break the Jobs-Hierarchy. Hence the block of code will not be interrupted by the cancellation signal and the entire block of code will complete without interruption.
+
+Super Important Thing to Note::
+--------------------------------
+
+Eventhough we break the cancellation chain by passing NonCancellable into the withContext(){} and make
+withContext(){} block NonCancellable, StructuredConcurrency still works.
+
+How we ensure structurred concurrency is woking?
+	" courotine done / coroutine cancelled " print statements didnt print before withContext(){} block 
+	completes execution. This behaviour of withCOntext(){} block should complete execution and then the
+	coroutine-1 ("my coroutine#2") print statements then complete its execution eventhough we make withContext(){} to execute in a different dispatcher (Dispatcher.IO). This ensures the code follows structurred concurrency.
+
+	from the logs we can verify that
+
+	withContext done              // with context completes its execution
+	coroutine cancelled           // coroutine-1 ("my coroutine#2") then completes its execution.
+	test done
+
+ Common Mis-Conception Among Developers Community:
+ ------------------------------------------------------
+
+ The cancellation support of cancelling internal coroutines and internal code inside coroutines is part of structured concurrency. (this is mis-conception)
+
+ The truth is Structurred concurrency does not deal with cancellation.  if we implement structuredconcurrency in way by establishing hierarchy of jobs so that we can provide cancellation support by making the internal coroutines to cancel in order by organising hierarchy of jobb. so the cancellation signal will probagate in order from top to deep down children. But its not required.
+
+ This top-down probagation feature of cancellation support is an additional feature that we can implement
+ in coroutines which is not related or tied to structured concurrency. But structuredConcurrency help to implement this cancellationSupport in a simpler way.
+
+ NonCancellable will break the hierarchy of jobs, and therefore cancellation signal will not probagate in the withCOntext(){} block of code and hence withContext(){} block of code will always completes sucessfully.
+
+
+ Very Interesting Observation in the Code:
+ -------------------------------------
+
+we really dont need to pass a "NonCancellable" job into the code-block (withContext(){}) in order to break the Job's Hierarchy. we can just pass a Job() instance into the code-block to break the Job's Hierarchy.
+
+
+    @Test
+    fun coroutinesCancellationMechanicsNonCancellable() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+            val job = scope.launch(CoroutineName("my coroutine") + Dispatchers.Default) {
+                try {
+                    delay(100)
+                    val job = Job()
+                    withContext(job + CoroutineName("withContext") + Dispatchers.IO) {  // avoiding NonCancellable
+                        try {                                                          // job and just pass a simple
+                            printJobsHierarchy(scopeJob)                              // Job() instance into the
+                            delay(100)                                              // withContext block, which will
+                            println("withContext done")                             // break the jobs hierarchy and
+                        } catch (e: CancellationException) {                      // behave in same way as it does
+                            println("withContext cancelled")                      // when NonCancellable is passed
+                        }
+                    }
+                    println("coroutine done")
+                } catch (e: CancellationException) {
+                    println("coroutine cancelled")
+                }
+            }
+            scope.launch(CoroutineName("my additional coroutine")) {
+                delay(150)
+                scopeJob.cancel()
+            }
+            job.join()
+            println("test done")
+        }
+
+// Logs of above Code
+
+- JobImpl{Active}@1fa28e99
+    - "my coroutine#2":StandaloneCoroutine{Active}@255d10f2              // withContext is no-longer part of 
+    - "my additional coroutine#3":StandaloneCoroutine{Active}@4ac1f34a    // "my coroutine#2", we broke hierarchy
+
+withContext done                                                        // as withContext block is disconnected
+coroutine cancelled                                                // from job's Hierarchy, It completes its
+test done                                                         // execution(top-Job cancellation didnt affect it.
+                                                                  //structured concurrency happens, exit of 
+                                                               // withContext fires CancellationException.
+
+If we further investigate the jobs hierarchy of the simple created job which we passed in to
+withContext(){} to break the hierarchy.
+
+    @Test
+    fun coroutinesCancellationMechanicsNonCancellable() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+            val job = scope.launch(CoroutineName("my coroutine") + Dispatchers.Default) {
+                try {
+                    delay(100)
+                    val job = Job()
+                    withContext(job + CoroutineName("withContext") + Dispatchers.IO) {
+                        try {
+                            printJobsHierarchy(job)                                     // checking the job
+                            delay(100)                                                 // hierarchy of injected job
+                            println("withContext done")
+                        } catch (e: CancellationException) {
+                            println("withContext cancelled")
+                        }
+                    }
+                    println("coroutine done")
+                } catch (e: CancellationException) {
+                    println("coroutine cancelled")
+                }
+            }
+            scope.launch(CoroutineName("my additional coroutine")) {
+                delay(150)
+                scopeJob.cancel()
+            }
+            job.join()
+            println("test done")
+        }
+    }
+
+// Logs of the code
+
+    - JobImpl{Active}@530becef                                        	// we just injected a single job, but
+    	- "withContext#2":DispatchedCoroutine{Active}@66da4818			// we can see 2 jobs in the hierarchy
+
+withContext done
+coroutine cancelled
+test done
+
+// End of Logs of the code
+
+Internally, with in withContext(){} we can see one more job created internally to execute the code mentioned
+inside the withContext(){} block. The job which we passed/injected in the withContext(){} will be the parent
+job of the newly created job with-in withContext(){}. The injected/passed-in job will not become the internal
+job, but it becomes the parent of the internal created job to handle the code block (withContext(){}).
+
+
+// but if we explicitly inject the job (which is supposed to automatically created by parent) into the
+withContext(){} block, by expicitly fetch it from the parent context. It doesnt make the injected job as parent and create a new job to handle the code-block of withContext (as it did when we manually inject a new createdjob). It uses the same injected job to execute the code-block (withContext(){}).
+
+// explicitly/manually injecting the job(we didnt explicitly create it)into the withContext(){} block,but we inject the job created by the parent scope(coroutine-1 is the parent scope of the withContext(){} block).
+
+// Not injecting the job explicitly to withContext, it used the parent scope job
+
+    @Test
+    fun coroutinesCancellationMechanicsNonCancellable() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+            val job = scope.launch(CoroutineName("my coroutine") + Dispatchers.Default) {
+                try {
+                    delay(100)
+                    withContext(CoroutineName("withContext") + Dispatchers.IO) {
+                        try {
+                            printJobsHierarchy(scopeJob)
+                            delay(100)
+                            println("withContext done")
+                        } catch (e: CancellationException) {
+                            println("withContext cancelled")
+                        }
+                    }
+                    println("coroutine done")
+                } catch (e: CancellationException) {
+                    println("coroutine cancelled")
+                }
+            }
+            scope.launch(CoroutineName("my additional coroutine")) {
+                delay(150)
+                scopeJob.cancel()
+            }
+            job.join()
+            println("test done")
+        }
+    }
+
+    // Logs of Code
+
+    - JobImpl{Active}@137666ab
+	    - "my coroutine#2":StandaloneCoroutine{Active}@5fc70bc4
+	        - "withContext#2":DispatchedCoroutine{Active}@69d0beae
+	    - "my additional coroutine#3":StandaloneCoroutine{Active}@2b89de4d
+
+	withContext cancelled
+	coroutine cancelled
+	test done
+
+    // End of Logs 
+
+
+(( Explicitly  injecting the job into the withContext(){}, but its the default parent scope created job. ))
+
+@Test
+    fun coroutinesCancellationMechanicsNonCancellable() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+            val job = scope.launch(CoroutineName("my coroutine") + Dispatchers.Default) {
+                try {
+                    delay(100)
+                    withContext(coroutineContext[Job]!! + CoroutineName("withContext") + Dispatchers.IO) {
+                        try {
+                            printJobsHierarchy(scopeJob)
+                            delay(100)
+                            println("withContext done")
+                        } catch (e: CancellationException) {
+                            println("withContext cancelled")
+                        }
+                    }
+                    println("coroutine done")
+                } catch (e: CancellationException) {
+                    println("coroutine cancelled")
+                }
+            }
+            scope.launch(CoroutineName("my additional coroutine")) {
+                delay(150)
+                scopeJob.cancel()
+            }
+            job.join()
+            println("test done")
+        }
+    }
+
+    // Logs of Code
+
+    - JobImpl{Active}@137666ab
+	    - "my coroutine#2":StandaloneCoroutine{Active}@5fc70bc4
+	        - "withContext#2":DispatchedCoroutine{Active}@69d0beae
+	    - "my additional coroutine#3":StandaloneCoroutine{Active}@2b89de4d
+
+	withContext cancelled                                                     // withContext will be part of
+	coroutine cancelled                                                       // jobs hierarchy, it responds to
+	test done                                                                // ancellation signal
+ 
+    // End of Logs 
+
+If we want a code-block as NonCancellable, we can simply inject new instance of Job into the code
+block (like we did it for withContext(){}). The code-block (withContext(){}) is no more part of jobs
+hierarchy and will not get the cancellationSignal when we cancel the top-most job / parent scope. the
+code block will sucessfuly complete its execution.
+
+	val job = Job()
+    withContext(job + CoroutineName("withContext") + Dispatchers.IO) {
+
+    }
+
+But its really Bad practice to follow in code, less readability. New developers will not understand the
+reason of using the "New instance of Job" which is passed in to make code block NonCancellable. Better to use
+"NonCancellable" instead of "New instance of Job".
+
+Injecting NonCancellable into the WithContext(){} function, it breaks the hierarchy of jobs and then cancellationSignal sent to the top-level job can't probagate down into the child and the code-block(withContext(){}) becomes NonCancellable. But structuredConcurrency will work, the cancellationSignal and
+Probagation of cancellationSignal will not affect the StructurredConcurrency.
+
+
+
+// Excercise
+
+/*
+    Write nested withContext blocks, explore the resulting Job's hierarchy, test cancellation
+    of the outer scope
+     */
+    @Test
+    fun nestedWithContext() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+            scope.launch(CoroutineName("Coroutine")){
+                try {
+                    delay(100)
+                    withContext(CoroutineName("Outer-WithContext")) {
+                        try {
+                            delay(100)
+                            withContext(CoroutineName("Nested-WithContext")) {
+                                try {
+                                    printJobsHierarchy(scopeJob)
+                                    delay(100)
+                                    println("Nested WithContext completed")
+                                } catch (e: CancellationException) {
+                                    println("Nested WithContext cancelled")
+                                }
+                            }
+                            println("Outer WithContext completed")
+                        } catch (e: CancellationException) {
+                            println("Outer WithContext cancelled")
+                        }
+                    }
+                    println("Coroutine completed")
+                } catch (e: CancellationException) {
+                    println("Coroutine cancelled")
+                }
+            }
+            scope.launch {
+                delay(250)
+                scopeJob.cancel()
+            }
+            scopeJob.join()
+            println("test done")
+        }
+    }
+
+    // Logs
+
+    - JobImpl{Active}@3a7e982a
+	    - "Coroutine#2":StandaloneCoroutine{Active}@2e15a449
+	        - "Outer-WithContext#2":UndispatchedCoroutine{Active}@2344516a
+	            - "Nested-WithContext#2":UndispatchedCoroutine{Active}@18a8ac74
+	    - "outer scope#3":StandaloneCoroutine{Active}@593040a7
+
+	Nested WithContext cancelled
+	Outer WithContext cancelled
+	Coroutine cancelled
+	test done
+
+ 	// End of Logs
+
+
+ 	// ************************************ Excercise #2 ***************************************************
+
+ 	    /*
+    Launch new coroutine inside another coroutine, explore the resulting Job's hierarchy, test cancellation
+    of the outer scope, explore structured concurrency
+     */
+    @Test
+    fun nestedLaunchBuilders() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+
+            scope.launch(CoroutineName("CoroutineOne")) {
+                try {
+                    delay(100)
+                    withContext(CoroutineName("WithContext")) {
+                        try {
+                            delay(100)
+                            launch(CoroutineName("InnerCoroutine")) {   // launch new coroutine(executes parallel)
+                                try {
+                                    printJobsHierarchy(scopeJob)
+                                    delay(100)
+                                    println("InnerCoroutine completed")
+                                } catch (e: CancellationException) {
+                                    println("InnerCoroutine cancelled")
+                                }
+                            }
+                            println("WithContext completed")
+                        } catch (e: CancellationException) {
+                            println("WithContext cancelled")
+                        }
+                    }
+                    println("CoroutineOne completed")
+                } catch (e: CancellationException) {
+                    println("CoroutineOne cancelled")
+                }
+            }
+            scope.launch(CoroutineName("CoroutineTwo")) {
+                delay(250)
+                scope.cancel()
+            }
+            scopeJob.join()
+            println("test done")
+        }
+    }
+
+    // Logs
+    																	// launch coroutine, run in parallel
+    WithContext completed                                                // to withContext(){}, so its completed
+	- JobImpl{Active}@5ec35f2
+	    - "CoroutineOne#2":StandaloneCoroutine{Active}@3621a607 
+	        - "WithContext#2":UndispatchedCoroutine{Completing}@651a516
+	            - "InnerCoroutine#4":StandaloneCoroutine{Active}@2f3fb8ae              // nested coroutine
+	    - "CoroutineTwo#3":StandaloneCoroutine{Active}@357e26b9                        // we use this to cancel
+
+	InnerCoroutine cancelled
+	CoroutineOne cancelled
+	test done
+
+	// End of Logs
+
+
+// ************************************ Excercise #3 ***************************************************
+ /*
+    Launch new coroutine on "outer scope" inside another coroutine, explore the resulting Job's hierarchy,
+    test cancellation of the outer scope, explore structured concurrency
+     */
+   
+ @Test
+    fun nestedCoroutineInOuterScope() {
+        runBlocking {
+            val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.IO)
+
+            scope.launch(CoroutineName("OuterCoroutine")) {
+                try {
+                    delay(100)
+                    withContext(CoroutineName("WithContext")) {
+                        try {
+                            delay(100)
+                            scope.launch(CoroutineName("InnerCoroutine")) { // new coroutine launched on
+                                try {                                       // outer scope, run concurrently
+                                    delay(100)                              // not as a child of withCOntext
+                                    println("InnerCoroutine completed")     // doesn't follow structuredConcurrency
+                                } catch (e: CancellationException) {        // of withContext. 
+                                    println("InnerCoroutine cancelled")
+                                }
+                            }
+                            printJobsHierarchy(scopeJob)
+                            println("WithContext completed")
+                        } catch (e: CancellationException) {
+                            println("WithContext cancelled")
+                        }
+                    }
+                    println("OuterCoroutine completed")
+                } catch (e: CancellationException) {
+                    println("OuterCoroutine cancelled")
+                }
+            }
+            scope.launch(CoroutineName("CoroutineOne")){
+                delay(250)
+                scope.cancel()
+            }
+            scopeJob.join()
+            println("test done")
+        }
+    }
+
+// Logs
+
+- JobImpl{Active}@455af7f7
+    - "OuterCoroutine#2":StandaloneCoroutine{Active}@2ec443ce      
+        - "WithContext#2":UndispatchedCoroutine{Active}@729076c
+    - "CoroutineOne#3":StandaloneCoroutine{Active}@1977fd89        // coroutine used to cancel the Jobs
+    - "InnerCoroutine#4":StandaloneCoroutine{Active}@3cc983a0     // Inner coroutine is child of top-most job
+
+WithContext completed                     // no structure concurrency between withContext and Innercoroutine
+OuterCoroutine completed                 // no structure concurrency between outercoroutine and Innercoroutine
+InnerCoroutine cancelled                 // only innercoroutine is cancelled, because only it is alive at cancel
+test done
+
+
+
+Summary: When you use withContext(){} blocks, you remain with in the scope of the same coroutine
+you dont get concurrency and structuredConcurrency works. 
+
+When you launch new coroutines with in parent coroutines using the same scope of the parent coroutine (you get concurrency and structured concurrency)
+
+If you launch new coroutines from with in other coroutines but you dont use the parent
+coroutine scope and use external scope (excercise - 3) then you get concurrency but you dont get structured
+concurrency.
+
+
+--------------------------------------------------------------------------------------------
+Part 7: Coroutine Mechanics,  Summary:
+--------------------------------------------------------------------------------------------
+
+Main Building blocks of Coroutine Framework:
+	1. CoroutineScope.
+	2. CoroutineContext.
+	3. CoroutineDispatcher.
+	4. Job
+
+CoroutineScope and CoroutineContext are technically almost equivalent, but used for different purpose.
+(coroutinescope simply wraps coroutinecontext, coroutinescope is used to manage and launch new coroutines,
+coroutinecontext is used to control the execution environment and put different elements into it).
+
+every time you alter coroutine-context in any way which tends to create a new coroutine-scope. 
+
+The most important aspect of coroutine-mechanics is Jobs-Hierarchy. This hierarchy which enables all coroutines "magic". Jobs-Hierarchy is super important, and understand its order in different situations. 
+
+Case-1: Nested withContext:
+---------------------
+	toplevelcoroutine, withcontext is nested inside it.
+
+	 		val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.Default)
+            scope.launch(CoroutineName("Coroutine")){   
+                    withContext(CoroutineName("Outer-WithContext") + Dispatchers.IO) {
+                    
+                    }
+			}
+
+Hierarchy looks like:
+							Jobs-Hierarchy (Hierarchy of parent-child relation):
+								-scope Job            // scope
+									-coroutine Job    // scope.launch
+										-context Job  // withContext
+
+In this case, it doesnt have concurrency. withContext executes sequentially with the rest of the code inside
+coroutine. We have in this order "StructuredConcurrency"(the parent coroutine will wait for the execution of all 
+the code inside withCOntext block even if the code inside withContext executes on a different thread dispatcher).
+
+Case-2: Nested Coroutine:
+-------------------
+
+		    val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.Default)
+            val job = scope.launch(CoroutineName("Coroutine")){
+                    println("Before Nested")
+                    val nestedJob = launch(CoroutineName("Inner coroutine") + Dispacthers.IO) { // launch in scope
+                     	println("nested")                                                       // parent 
+                    }                                                                           // coroutine
+                    nestedJob.invokeOnCompletion{
+                     	println("nested coroutine completed")   
+                    }
+                    println("after nested")   
+            }
+			job.invokeOnCompletion{
+            	println("coroutine completed")   
+            }
+            job.join()
+
+
+Hierarchy looks like:
+							Jobs-Hierarchy (Hierarchy of parent-child relation):
+								-scope Job            // scope
+									-coroutine Job    // scope.launch{}
+										-nested coroutine Job  // launch{}
+
+In this case we get Concurrency, coroutines are concurrent to one another. Parent coroutine started child 
+coroutine and the proceed of execution of its source code without waiting for child coroutine to complete.
+we still have structuredConcurrency (parent coroutine, starts the child coroutine and continue to execute its
+source code and wait for the child for its completion. only when child coroutine completes, only then parent coroutine will complete). In this case we have concurrency as well as structuredConcurrency. When we use nested coroutines if we launch like the code above using launch{} (launching nested coroutine using the scope of 
+parent coroutine)
+
+
+Case-3: Nested Coroutine on a standalone scope:
+----------------------------------------
+
+when we launch child coroutine on standalone scope, below code uses the parent scope as a stand alone scope to launch the child coroutine. we can also use any other scope to launch child coroutine which is not within the subtree of the parent coroutine scope 
+
+
+
+		    val scopeJob = Job()
+            val scope = CoroutineScope(scopeJob + CoroutineName("outer scope") + Dispatchers.Default)
+            val job = scope.launch(CoroutineName("Coroutine")){
+                    println("Before Nested")
+                    val nestedJob = scope.launch(CoroutineName("Inner coroutine") + Dispacthers.IO) { // launch 																				// in scope
+                     	println("nested")                                                       // parent 
+                    }                                                                           // coroutine
+                    nestedJob.invokeOnCompletion{
+                     	println("nested coroutine completed")   
+                    }
+                    println("after nested")   
+            }
+			job.invokeOnCompletion{
+            	println("coroutine completed")   
+            }
+            job.join()
+
+
+Hierarchy looks like:
+							Jobs-Hierarchy (Hierarchy of parent-child relation):
+								-scope Job            // scope
+									-coroutine Job    // scope.launch{}
+									-nested coroutine Job  // this coroutine is not on the path of the children
+                                                           // of coroutine job. its independent of coroutine Job
+
+In this case, we get concurrency. Nested coroutine will run concurrenly with top level coroutine. but we dont
+have structuredConcurrency. Top-level coroutine can complete before nested coroutine completes. 
+
+	// logs looks like 
+		after nested
+		croutine completed
+		nested
+		nested coroutine completed
+
+This approach of using coroutines is reserved for very specific use-cases. In most cases we launch the nested coroutine with in the parent scope so that we get both concurrency and structurred concurrency(Nested Coroutine).
+we go for this approach of "Nested Coroutine on a standalone scope" when we explicitly want to break the structuredConcurrency (allow the nested coroutine to stay alive after parent coroutine completes and returns)
+
+
+NonCancellable is "detaching" withContext from its parent job : 
+-----------------------------------------------------------------
+
+using NonCancellable is like replacing the parent job of withContext(){} with NonCancellable and therefore
+cancellationsignal cant go down into coroutine scope of withContext and therefore it becomes Noncancellable.
+Can acheive the same(passing NonCancellable) by simple replacing the parent job with a "new instance of Job". 
+
+Very Important Note: "NonCancellable is designed for withContext exclusively", cannot use the NonCancellable
+for nested coroutine to make it detach to the job hierarchy and avoid cancellation signal. Passing NonCancellable to nested coroutine will lead to strange behaviour of code. Using NonCancellable to break the parent child relationship of coroutines.
+
+if you want a code block to be NonCancellable with respect to coroutines, use "NonCancellable, but only inside withContext block". Dont use "NonCancellable - Job" with any other construct.
+
+Some Important observation on the below code
+-----------------------------------------------
+
+coroutineScope.launch {
+                try {
+                    btnFetch.isEnabled = false
+                    fetchAndCacheUsersUseCase.fetchAndCacheUsers(userIds)
+                    updateElapsedTimeJob.cancel()
+                } catch (e: CancellationException) {
+                    updateElapsedTimeJob.cancelAndJoin() 	// <= This is suspend method call, can again fire
+                    txtElapsedTime.text = ""                // CancellationException. and avoid executing futher
+                } finally {                                 // code below
+                    btnFetch.isEnabled = true
+                }
+}
+
+
+If the coroutine is cancelled, suspend functions (fetchAndCacheUsers(userIds)) will return CancellationException
+and its handled in catch-block. we have Ui-reinitialization code in catch-block which is supposed to execute completely to reinitialize the UI. 
+
+But we could see there is a suspend function(updateElapsedTimeJob.cancelAndJoin()) in catch-block which can again throw a cancellationException and will avoid the execution of further code in catch-block. We need entire code in catch-block should execute. Hence we have to wrap the entire code in catch-block using withContext(NonCancellable) {} which will avoid initiation of CancellationException because of scope.cancel / scopeJob.cancel.
+
+
+coroutineScope.launch {
+                try {
+                    btnFetch.isEnabled = false
+                    fetchAndCacheUsersUseCase.fetchAndCacheUsers(userIds)
+                    updateElapsedTimeJob.cancel()
+                } catch (e: CancellationException) {
+                    withContext(NonCancellable) {
+                        updateElapsedTimeJob.cancelAndJoin()
+                        txtElapsedTime.text = ""
+                    }
+                } finally {
+                    btnFetch.isEnabled = true
+                }
+}

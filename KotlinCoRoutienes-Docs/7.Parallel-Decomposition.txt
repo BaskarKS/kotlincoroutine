@@ -1,0 +1,170 @@
+
+------------------------------------------------------------------------------------------------------------------
+									PARALLEL DECOMPOSITION
+------------------------------------------------------------------------------------------------------------------
+	
+	Time         Algorithm                   Parallelised Algorithm
+	  |                         (rearranged to execute the substeps concurrently)
+	  |             |    ^
+	  |             A    |        
+	  |             |    |
+	  |             B  speed-up                  -A-B-C-
+	  |	  	  	  	| 	 | 
+	  |             C    |
+	  |             |	 V 
+
+Subject to very specific constraints and conditions, algorithm is segregated into A, B, C substeps which can execute in parallel to enhance the execution speed of the algorithm.
+
+Converting the entire sequence of algorithm and break it into sub-steps(specific to constraints and conditions), where the sub-steps can be executed parallely / concurrently to reduce the entire algorithm to execute sequentially.
+
+Parallel Decomposition of algorithm is a very complex topic.
+
+-----------------------
+Shared Mutable State:
+-----------------------
+
+ Atomicity: its when you execute multiple actions as though they are one single action. Either execute all of them together or none of them, nothing else can happen in between.
+
+ someVariable++ => its not atomic, its composed of 3 different steps.
+
+
+
+   @Test
+    fun wrongUseOfCoroutines() = runBlocking {
+        var totalIterations = 0                                  <------- Shared Mutable State
+        withContext(Dispatchers.Default) {
+            for (duration in 1..5) {                                 
+                launch {                                         <---------- 5 concurrent threads
+                    val startTimeNano = System.nanoTime()
+                    var iterations = 0
+                    while (System.nanoTime() < startTimeNano + (duration * 10f.pow(9))) {
+                        iterations++
+                    }
+                    totalIterations += iterations                <---------- 5 concurrent threads use the same 
+                }                                                            variable to modify it, can lead to wrong
+            }                                                                updation / overwrite of value
+        }
+        println("total iterations: $totalIterations")
+    }
+
+whenever we have a shared mutable variable, thats the source of concurrent bugs. 
+How to return the result or return back the computation done in concurrent threads back to the outside world.
+
+How to pass the effects occurred due to some computation happen with in concurrent coroutines to the outside of that coroutine
+	1. shared mutable state.
+	2. just return the value from each coroutine
+
+Coroutine(launch {}) cannot return a result, it can just return a Job. We can either call cancel / join on it, but the coroutine cannot return result.
+
+from launch{} we can only return the computation only through some shared mutable variable. we cannot return
+the result in anyway.
+
+Theres different constructs in coroutine which can provide concurrency as well as able to return the result.
+
+
+-------------------------------------------------------------------------------------------------------------------
+										"Async" COROUTINE BUILDER:
+-------------------------------------------------------------------------------------------------------------------
+
+launch {} coroutine builder cant return a computed result, but coroutine framework provides another coroutine builder
+which can return the computed result. which is Async coroutine builder.
+
+  fun correctUseOfCoroutinesVariant1() = runBlocking {
+        withContext(Dispatchers.Default) {
+            for (duration in 1..5) {
+                        val deferred = async {                                         // launch a coroutine and will
+                            val startTimeNano = System.nanoTime()                    // return Deferred<Result> type
+                            var iterations = 0
+                            while (System.nanoTime() < startTimeNano + (duration * 10f.pow(9))) {
+                                iterations++
+                            }
+                            iterations
+                        }
+                        val iterations = deferred.await()       // its blocking call, will cause calling code to wait
+                        println("Iterations : $iterations")     // for the result
+            }
+        }
+    }
+
+    this test takes 15secs to complete execution because of executing in serial(1 + 2 + 3 + 4 + 5), for every iteration deferred.await() will block the calling thread to wait until the result is returned.
+    Actually, await will execute concurrently when triggerred for operartion, but the implementation way of 
+    calling await on result causes the execution to happen in serial(one after another).
+
+    Changing implementation with modifications so that await can execute concurrent.
+
+        fun correctUseOfCoroutinesVariant1() = runBlocking {
+
+	        withContext(Dispatchers.Default) {
+	            val deferreds = mutableListOf<Deferred<Int>>()      // creating List of Deferred<Result> to collect
+
+	            for (duration in 1..5) {
+	                val returnValues = async {                             // we collect the Deferred<Result> in
+	                    val startTimeNano = System.nanoTime()             // List, instead calling await on results
+	                    var iterations = 0
+	                    while (System.nanoTime() < startTimeNano + (duration * 10f.pow(9))) {
+	                        iterations++
+	                    }
+	                    iterations
+	                }
+	                deferreds.add(returnValues)
+	            }
+	            
+	            var totalIterations = 0                     // to store total results
+	            for (deferred in deferreds) {               // collected results is iterated, 5 deferred results
+	                totalIterations += deferred.await()     // wait till coroutine completes and result is available
+	            }
+
+	            println("total iterations: $totalIterations")
+	        }
+    }
+
+ // Better or simple way of implementation 
+
+ fun correctUseOfCoroutinesVariant2() = runBlocking {
+        withContext(Dispatchers.Default) {
+            val totalIterations = (1..5).toList().map { duration ->  // map will map each element in list to list
+                async {
+                    val startTimeNano = System.nanoTime()
+                    var iterations = 0
+                    while (System.nanoTime() < startTimeNano + (duration * 10f.pow(9))) {
+                        iterations++
+                    }
+                    iterations
+                }
+            }.awaitAll().sum() // awaitAll will wait on Collections<Deferred<Result>>, sum return sum of collection
+
+            println("total iterations: $totalIterations")
+        }
+    }
+
+Async is a standard coroutine  builder which also returns result. It returns the result is by wrapping it inside
+deferred object, we can await on the deferred object to get the result of async coroutine. 
+
+When we use async coroutine builder to gather results of async concurrent coroutines, we can rely on the underlying
+function provided by coroutine framework like "async", 'await' which ensures thread-safety. No need to use
+"shared mutable state variables" which raise concurrency bugs. Build algorithms where you get results from multiple
+concurrent coroutines and then process all the results together. 
+
+
+
+-------------------------------------------------------------------------------------------------------------
+								Parallel Decomposition Summary
+-------------------------------------------------------------------------------------------------------------
+
+Parallel Decomposition of algorithms is a technique which allows you to take advantage of concurrent execution
+and "speed the algorithms Up"
+
+If you have an algorithm which implements several sequential steps, and we notice that some of the steps can
+be executed concurrently. we execute those steps concurrently which will reduce the time of execution of the
+algorithm. 
+
+Parallel Decomposition Using Coroutines:
+
+	coroutine frameworks the below 2 builders to make code parallel decomposition
+		1. CoroutineScope.launch {} - concurrent coroutines for side effects(just to execute the code in parallel)
+		2. CoroutineScope.async {} -  concurrent coroutines for side effects and return result.
+
+	Note: Do not access shared mutable state from concurrent coroutines. If you are forced to use a mutable shared
+	variable, check and find a way to avoid it. If we use parallel decomposition using coroutine framework we can do that safely, it just need skill, knowledge.
+
+	

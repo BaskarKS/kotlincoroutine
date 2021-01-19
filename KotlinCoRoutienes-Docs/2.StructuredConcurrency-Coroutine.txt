@@ -1,0 +1,355 @@
+Structured Concurrency:
+--------------------------
+
+Synchronous Implementation:
+----------------------------
+
+   public void computeFibonacci_10_returnsCorrectAnswer() throws Exception {        // execute on test thread, 		
+   																					// but blocks main thread
+        // Arrange
+        // Act
+        BigInteger result = SUT.computeFibonacci(10); // takes approximately 100ms and return result
+        // Assert
+        assertThat(result, is(new BigInteger("55"))); // validate the result
+    }
+
+// production code blocks the calling thread(UI Thread) for prolonged period
+
+
+
+Concurrent Implementation with Async Callback:
+----------------------------------------------
+
+	Pros: Production code doesnt block the calling thread (we use worker thread for computation)
+	Cons: Time to execute the below method takes too much time because of "flakiness safeguard time",
+			but callback to return result is invoked on the worker thread
+
+
+
+   public void computeFibonacci_10_returnsCorrectAnswer()           TestThread                 WorkerThread
+   								throws Exception {                      |                           |
+                                                                        |                           |
+        SUT.computeFibonacci(10, mCallback);   ------------------------>|-------------------------->|
+        Thread.sleep(200); 						<-----------------------|                           |
+        										                        |<--------------------------| 100ms
+        // Assert                                                       | additional time to make   |
+        assertThat(lastResult, is(new BigInteger("55"))); <-------------| sure, lastResult value is set	properly
+                                                                          (flakiness safeguard time)
+    }
+
+   public void computeFibonacci_10_returnsCorrectAnswer() throws Exception {
+        // Arrange
+        // Act
+        SUT.computeFibonacci(10, mCallback);
+        Thread.sleep(200); 						// to delay this test thread until the callback is called by 
+        										// computeFibonacci() from different thread and result is set here
+        // Assert
+        assertThat(lastResult, is(new BigInteger("55"))); // computed result will be set in lastResult by callback
+    }
+
+class FibonacciUseCaseAsync {
+
+    public interface Callback {
+        public void onFibonacciComputed(BigInteger result);
+    }
+
+    public void computeFibonacci(int index, Callback callback) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                BigInteger result = computeFibonacciBg(index);
+                callback.onFibonacciComputed(result); 			// result is delivered through callback
+            }
+        }).start();
+    }
+
+    @WorkerThread
+    private BigInteger computeFibonacciBg(int index) { // executed on worker thread
+        if (index == 0) {
+            return new BigInteger("0");
+        } else if (index == 1) {
+            return new BigInteger("1");
+        } else {
+            return computeFibonacciBg(index - 1).add(computeFibonacciBg(index - 2));
+        }
+    }
+}
+
+Concurrent Implementation with Async Callback using ThreadPoster:
+------------------------------------------------------------------
+
+Pros: Production Code doesnt block the calling thread, no overhead in unit tests, relatively simple.
+cons: requires developers to follow additional conventions (ThreadPostersTestDouble, BackgroundThreadPoster, 
+															UiThreadPoster...)
+
+public class FibonacciUseCaseAsyncUiThreadPosterTest {
+
+    FibonacciUseCaseAsyncUiThreadPoster.Callback mCallback;
+    FibonacciUseCaseAsyncUiThreadPoster SUT;
+
+    BigInteger lastResult = null;
+
+    ThreadPostersTestDouble mThreadPostersTestDouble;
+
+    @Before
+    public void setup() throws Exception {
+        mThreadPostersTestDouble = new ThreadPostersTestDouble();
+        mCallback = new FibonacciUseCaseAsyncUiThreadPoster.Callback() {
+            @Override
+            public void onFibonacciComputed(BigInteger result) {
+                lastResult = result;
+            }
+        };
+        SUT = new FibonacciUseCaseAsyncUiThreadPoster(
+                mThreadPostersTestDouble.getBackgroundTestDouble(),
+                mThreadPostersTestDouble.getUiTestDouble()
+        );
+    }
+  	
+  	public void computeFibonacci_10_returnsCorrectAnswer()        // Test      // Worker  // UI
+  	                                   throws Exception {         // Thread    // Thread  // Thread													|		     
+  	                                   					 			   |			
+        SUT.computeFibonacci(10, mCallback); ------------------------->|----------->|
+                                                                       |            |------>|
+        mThreadPostersTestDouble.join(); -------------Blocked--------- |            |       |
+        													 (unblock)\|<----callback ------|
+        // continue to execute when join is unblocked        		   
+        assertThat(lastResult, is(new BigInteger("55")));
+    }
+}
+
+//.join() functionality: do not proceed with execution (block calling thread) until all flows, including the
+concurrent ones complete. once join is unblocked, which means all the above concurrent code has completed 
+execution
+
+
+
+class FibonacciUseCaseAsyncUiThreadPoster {
+
+
+    public interface Callback {
+        public void onFibonacciComputed(BigInteger result);
+    }
+
+    private final BackgroundThreadPoster mBackgroundThreadPoster;
+    private final UiThreadPoster mUiThreadPoster;
+
+    FibonacciUseCaseAsyncUiThreadPoster(BackgroundThreadPoster backgroundThreadPoster, UiThreadPoster uiThreadPoster) {
+        mBackgroundThreadPoster = backgroundThreadPoster;
+        mUiThreadPoster = uiThreadPoster;
+    }
+
+    public void computeFibonacci(int index, Callback callback) {
+        mBackgroundThreadPoster.post(new Runnable() {
+            @Override
+            public void run() {
+                BigInteger result = computeFibonacciBg(index);
+                notifyResult(result, callback);
+            }
+        });
+    }
+
+
+    @WorkerThread
+    private BigInteger computeFibonacciBg(int index) {
+        if (index == 0) {
+            return new BigInteger("0");
+        } else if (index == 1) {
+            return new BigInteger("1");
+        } else {
+            return computeFibonacciBg(index - 1).add(computeFibonacciBg(index - 2));
+        }
+    }
+
+    private void notifyResult(BigInteger result, Callback callback) {
+        mUiThreadPoster.post(new Runnable() {
+            @Override
+            public void run() {
+                callback.onFibonacciComputed(result);
+            }
+        });
+    }
+}
+
+The above way of code execution is called structured concurrency,
+Structured Concurrecy: an ability to "pause" code execution and "wait" for all concurrent 
+						flows which can be traced back to a specific "ancestor"(in above code
+						mThreadPostersTestDouble is the ancestor) to complete.
+
+kotlin coroutine provides advanced support for Structured Concurrency.						
+
+
+
+Concurrent Fibonacci Computation using Coroutines(callback):
+-------------------------------------------------------------
+
+Suspend functions should be called with in a CoRoutineScope / another suspend function.. Inside 
+suspend function we should not assume in which Dispatcher context the suspending function 
+will be called, hence we need to explicitly define a context( withContext(Dispatchers.Main){}) and with
+in the context we have to defined the code which are supposed to be in the suspend function.
+
+To fake Main thread in Unit test code, we need to include a dependency in Gragdle file
+
+testImplementation "org.jetbrains.kotlinx:kotlinx-coroutines-test:1.3.7"
+
+Inject fake Dispatcher of MainThread in Unit tests
+
+class FibonacciUseCaseAsyncUiCoroutinesTest {
+
+    private lateinit var callback: FibonacciUseCaseAsyncUiCoroutines.Callback
+    private lateinit var SUT: FibonacciUseCaseAsyncUiCoroutines
+
+    var lastResult: BigInteger? = null
+    private val testCoroutineDispatcher = TestCoroutineDispatcher() // Fake Dispatcher for Test Code
+
+    @Before
+    fun setup() {
+        Dispatchers.setMain(testCoroutineDispatcher)                    // make this as Main Dispatcher for Test
+        
+        callback = object : FibonacciUseCaseAsyncUiCoroutines.Callback {
+            override fun onFibonacciComputed(result: BigInteger?) {
+                lastResult = result
+            }
+        }
+
+        SUT = FibonacciUseCaseAsyncUiCoroutines(testCoroutineDispatcher) // we pass this fake dispatcher to use
+    }
+
+    @After
+    fun tearDown() {
+        Dispatchers.resetMain()                                         // reset the main dispatcher on test finish
+    }
+
+    @Test
+    fun computeFibonacci_0_returns0() {
+        testCoroutineDispatcher.runBlockingTest { // this block will establish structured concurrency
+            // Arrange
+            // Act
+            SUT.computeFibonacci(0, callback) // once execution of this call finishes, then it proceed to next line
+            // Assert
+            assertThat(lastResult, `is`(BigInteger("0")))
+        }
+    }
+}
+
+
+// Main Class which contain fibonacci code
+
+
+                           // this constructor field used for sucessfull test case execution
+internal class FibonacciUseCaseAsyncUiCoroutines(private val bgDispatcher: CoroutineDispatcher) {
+
+    interface Callback {
+        fun onFibonacciComputed(result: BigInteger?)
+    }
+
+    private val coroutineScope = CoroutineScope(Dispatchers.Main)
+
+    fun computeFibonacci(index: Int, callback: Callback) {
+        coroutineScope.launch {
+            val result = computeFibonacciBg(index) // this is suspend function, next line will be executed
+            callback.onFibonacciComputed(result)    // after executing computeFibonacciBg()
+        }
+    }
+                                           // if we use Dispatcher.default here in withContext, Test case
+                                           // cant fake it, hence we made this dispatcher as a 
+                                           // constructor field so that we can pass the 
+                                           //fake dispatcher from outside(from test case to test
+                                           the functionality / actual Dispatcher.Default from production code)
+    private suspend fun computeFibonacciBg(index: Int): BigInteger = withContext(bgDispatcher) {
+        if (index == 0) {
+            BigInteger("0")
+        } else if (index == 1) {
+            BigInteger("1")
+        } else {
+            computeFibonacciBg(index - 1).add(computeFibonacciBg(index - 2))
+        }
+    }
+
+}
+
+Kotlin coroutines will establish structured concurrency.
+
+
+
+---------------------------------------------------------------
+Concurrent Fibonacci Computation using Coroutines(Suspending):
+---------------------------------------------------------------
+
+class FibonacciUseCaseUiCoroutines() {
+                                     // idomatic way of structured concurrency using suspend function
+    suspend fun computeFibonacci(index: Int): BigInteger = withContext(Dispatchers.Default) {
+        if (index == 0) {
+            BigInteger("0")
+        } else if (index == 1 ) {
+            BigInteger("1")
+        } else {
+            computeFibonacci(index - 1).add(computeFibonacci(index - 2))
+        }
+    }
+
+}
+
+
+@ExperimentalCoroutinesApi
+class FibonacciUseCaseUiCoroutinesTest {
+
+    private lateinit var SUT: FibonacciUseCaseUiCoroutines
+
+    @Before
+    fun setup() {
+        SUT = FibonacciUseCaseUiCoroutines()
+    }
+
+    @Test
+    fun computeFibonacci_0_returns0() {
+        runBlocking {                  // enables structured concurrency
+            // Arrange
+            // Act                                // framwork uses, test thread here. 
+            val result = SUT.computeFibonacci(0) // blocked at this line, next line executes only this line complete
+            // Assert
+            assertThat(result, `is`(BigInteger("0")))
+        }
+    }
+}
+
+---------------------------------------------------------------
+				Structured Concurrency Summary:
+---------------------------------------------------------------
+
+  	public void computeFibonacci_10_returnsCorrectAnswer()        // Test      // Worker  // UI
+  	                                   throws Exception {         // Thread    // Thread  // Thread													|		     
+  	                                   					 			   |			
+        SUT.computeFibonacci(10, mCallback); ------------------------->|----------->|
+                                                                       |            |------>|
+        mThreadPostersTestDouble.join(); -------------Blocked--------- |            |       |
+        													 (unblock)\|<----callback ------|
+        // continue to execute when join is unblocked        		   
+        assertThat(lastResult, is(new BigInteger("55")));
+    }
+
+    When the test-Thread(thread used to execute Unit test / run the above test code) passes/proceed this
+    .join() call, then its guarenteed that all concurrenct processes that are used above inside the 
+    system under test(computeFibonacci() production code) have completed executing. Therefore in this case
+    its confirmed that lastResult field will have the right/correct value. 
+    	The property of using .join() method to make wait for all concurrent processes above to complete 
+    	before proceeding executing the below statements is called structurred concurrency.
+
+   	*	an ability to "pause" code execution and "wait" for all concurrent flows which can be traced back to
+   	a specific "ancestor" to complete.
+   	In ThreadPoster, "pause" means blocking the thread. "wait" is waiting thread, "ancestor" indicate the
+   	unit Test case  that used thread poster(mThreadPostersTestDouble).
+
+   	* In coroutiene, "pause" means runBlocking{} which we used in UnitTestCases or "suspend" function which
+   	we used in productionCode(computeFibonacci()), "wait" means a blocking thread / coroutine that waits.
+   	"ancestor" is different.
+
+   	* structured concurrency is a higher level paradigm which is independent of frameworks / languages.
+   	It describes a very interesting property, is to establish some kind of ordering between the statements
+   	in source code which guarentees that when a specific statement is executed it will ensure all the 
+   	previous concurrent process have completed its execution.
+
+   	Kotlin coroutien provides very advanced support for Structured Concurrency, Structured concurrency
+   	increases the complexity of the framework. It doesnt provide/make concurrent code safer automatically.
+
+   	*	Structured Concurrency allows for more straightforward implementation of some concurrent flows.

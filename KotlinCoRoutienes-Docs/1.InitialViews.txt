@@ -1,0 +1,601 @@
+Concurrency:
+-------------
+Multiple tasks with-in a program which seem to be executed at the same time, are said to
+be executed concurrently.
+
+Concurrent tasks can be completely independent, or they can have inter-dependencies which
+establish specific ordering rules between them.
+
+Coroutiens is a framework used to introduce concurrency into kotlin applications.
+
+class BasicCoroutinesDemoFragment : BaseFragment() {
+
+	override fun onCreateView(inflater: LayoutInflater, 
+						  container: ViewGroup?, 
+						  savedInstanceState: Bundle?): View? {
+
+
+    private val coroutineScope = CoroutineScope(Dispatchers.Main.immediate) // Create a CoroutieneScope with Main 	
+    																		// Thread, when executing in this
+    																		// coroutienescope it runs on Main Thread
+
+        btnStart.setOnClickListener {
+            logThreadInfo("button callback")
+            btnStart.isEnabled = false
+
+			// this create and executes a new coroutienescope and executed the code in MainThread, as no schedulers
+			// are explicitly mentioned
+            coroutineScope.launch {  // Its executes in MainThread scope(Default scope)
+                val iterationsCount = executeBenchmark() // this is a suspend function, below code should execute 
+                										// after this method finishes execution
+                Toast.makeText(requireContext(), "$iterationsCount", Toast.LENGTH_SHORT).show()
+                btnStart.isEnabled = true  // this also runs on MainThread scope
+            }
+        }
+    }
+
+
+    private suspend fun executeBenchmark(): Long { // this method is a suspend function
+        val benchmarkDurationSeconds = 5
+
+        updateRemainingTime(benchmarkDurationSeconds) // this code will get executed in Default(MainThread) scope
+
+        return withContext(Dispatchers.Default) { // the part of code mentioned inside withContext(
+        										 // Dispatchers.Default) will get executed in a different thread
+        										 // pool, but not in Main Thread context.
+            logThreadInfo("benchmark started")
+
+            val stopTimeNano = System.nanoTime() + benchmarkDurationSeconds * 1_000_000_000L
+
+            var iterationsCount: Long = 0
+            while (System.nanoTime() < stopTimeNano) {
+                iterationsCount++
+            }
+
+            logThreadInfo("benchmark completed")
+
+            iterationsCount
+        }
+    }
+
+----------------------------------
+CoRoutiene Cancellation Basics
+----------------------------------
+Cancelling the coroutiene task's when application 
+exits / closed by user / moved to background(user press home).
+
+class Exercise1Fragment : BaseFragment() {
+
+	private var job: Job? = null
+
+	override fun onCreateView(
+								inflater: LayoutInflater, 
+								container: ViewGroup?, 
+								savedInstanceState: Bundle?): View? {
+
+			btnGetReputation = view.findViewById(R.id.btn_get_reputation)
+	        btnGetReputation.setOnClickListener {
+	            logThreadInfo("button callback")
+	            job = myCoroutineScope.launch { // capture "Job" object when launching coroutiene
+	            								// useful to cancel when user exit the app.
+	                btnGetReputation.isEnabled = false // if job.cancel() is invoked before this point, coroutiene
+	                                                   // will get cancelled.
+	                val reputation = getReputationForUser(edtUserId.text.toString()) // job.cancel() will not
+	                                                       // stop or interrupt the execution of this method.
+	                                                       // instead, it will get cancelled once this method
+	                                                       // returns, below code will not be executed because
+	                                                       // of job.cancel() called in onStop()
+
+	                Toast.makeText(requireContext(), "reputation: $reputation", Toast.LENGTH_SHORT).show()
+	                btnGetReputation.isEnabled = true
+	            }
+	        }
+	}
+
+	override fun onStop() {
+	    super.onStop()
+	    job?.cancel()
+	}
+}
+
+myCoroutineScope.launch{} will return a nullable Job object (Job?), when our application exits the 
+UI, then we can call cancel() on the Job object to cancel the coroutiene.
+
+Actually cancel of the Job happens either before the background thread starts, or background thread
+exits. But not while executing the background task, when the background thread is active-running,
+calling cancel() on the Job will not stop the coroutiene. 
+
+In our case withContext(Dispachers.Default){} is the code which execute the time consuming task in
+background thread(Dispachers.Default thread pool) If calling cancel() on the Job is called before 
+withContext(Dispachers.Default){} code starts executing, then the couroutiene will get cancelled 
+without starting executing the code in the background Thread. If calling cancel() on the Job is 
+called after withContext(Dispachers.Default){} code starts execution, then the coroutiene will not
+get cancelled and will wait till the background thread (withContext(Dispachers.Default){}) completes
+its execution. Then the coroutiene can cancel itself sucessfully which means the remaining code 
+which is after the background thread (withContext(Dispachers.Default){})) will not get executed.
+
+In our case, the below code will not get executed because of coroutine cancellation( job.cancel())
+
+	Toast.makeText(requireContext(), "reputation: $reputation", Toast.LENGTH_SHORT).show()
+	btnGetReputation.isEnabled = true
+
+
+----------------------------------
+	Concurrent CoRoutiene
+----------------------------------
+
+    private fun updateRemainingTime(remainingTimeSeconds: Int) {
+        logThreadInfo("updateRemainingTime: $remainingTimeSeconds seconds")
+
+        if (remainingTimeSeconds > 0) {
+            txtRemainingTime.text = "$remainingTimeSeconds seconds remaining"
+            Handler(Looper.getMainLooper()).postDelayed({
+                updateRemainingTime(remainingTimeSeconds - 1)
+            }, 1000)
+        } else {
+            txtRemainingTime.text = "done!"
+        }
+
+    }
+
+    updateRemainingTime() method is called with in the 
+    private suspend fun executeBenchmark(): Long { } , updateRemainingTime() which will eget executed
+    in UI thread context(main thread is the default thread pool for the created coroutine).
+
+    The code inside the updateRemainingTime() uses Handler to post the delay(legacy code), we change the
+    way of legacy code in Kotlin-Coroutine way, as below
+
+    private suspend fun updateRemainingTime(remainingTimeSeconds: Int) {
+        for (time in remainingTimeSeconds downTo 0) {
+            if (time > 0) {
+                logThreadInfo("updateRemainingTime: $time seconds")
+                txtRemainingTime.text = "$time seconds remaining"
+                delay(1000)
+            } else {
+                txtRemainingTime.text = "done!"
+            }
+        }
+    }
+
+Making the method as "suspend" method and using coroutiene(delay(1000)) we can acheive the same
+result of using Handler-postDelayed().
+
+But invoking area of this method inside the executeBenchmark(), will cause a different problem,
+
+private suspend fun executeBenchmark(): Long { // this method is a suspend function
+        val benchmarkDurationSeconds = 5
+
+        updateRemainingTime(benchmarkDurationSeconds) // this code will get executed in Default(MainThread) scope
+
+        return withContext(Dispatchers.Default) { // the part of code mentioned inside withContext(
+        										 // Dispatchers.Default) will get executed in a different thread
+        										 // pool, but not in Main Thread context.
+            logThreadInfo("benchmark started")
+
+            val stopTimeNano = System.nanoTime() + benchmarkDurationSeconds * 1_000_000_000L
+
+            var iterationsCount: Long = 0
+            while (System.nanoTime() < stopTimeNano) {
+                iterationsCount++
+            }
+
+            logThreadInfo("benchmark completed")
+
+            iterationsCount
+        }
+}    
+
+Problem :: 
+updateRemainingTime() is made as a "suspend" function which could be called only
+in Coroutine context.
+Until the updateRemainingTime() finishes execution the next line of updateRemainingTime() will not
+get invoked, means(until updateRemainingTime() finishes execution, 
+withContext(Dispatchers.Default) {}, will not get its execution started). To solve this problem
+
+Solution::
+The execution of withContext(Dispatchers.Default) {} and updateRemainingTime() should be started
+concurrently. and both of the calls should be in different coroutiene scopes. Hence calling
+updateRemainingTime() with in executeBenchmark() method is removed and invoked concurrently
+
+class ConcurrentCoroutinesDemoFragment : BaseFragment() {
+	private val coroutineScope = CoroutineScope(Dispatchers.Main.immediate)
+
+	private var jobCounter: Job? = null
+    private var job: Job? = null
+
+     override fun onCreateView(inflater: LayoutInflater, 
+							     container: ViewGroup?, 
+							     savedInstanceState: Bundle?): View? {
+
+		 btnStart.setOnClickListener {
+            logThreadInfo("button callback")
+
+            val benchmarkDurationSeconds = 5
+
+            jobCounter = coroutineScope.launch { // started in different scope, default is Main-Thread
+                updateRemainingTime(benchmarkDurationSeconds) // this is "suspend" function
+            }
+
+            job = coroutineScope.launch {		// started in different scope, default is Main-Thread
+                btnStart.isEnabled = false
+                val iterationsCount = executeBenchmark(benchmarkDurationSeconds) // this is "suspend" function
+                Toast.makeText(requireContext(), "$iterationsCount", Toast.LENGTH_SHORT).show()
+                btnStart.isEnabled = true
+            }
+        }
+        return view
+    }
+
+    override fun onStop() {
+        logThreadInfo("onStop()")
+        super.onStop()
+        job?.cancel()                           // benchmark-coroutine is cancelled
+        btnStart.isEnabled = true
+        jobCounter?.apply {                     // updateRemainingTime-coroutine is cancelled
+            cancel()
+            txtRemainingTime.text = "done!"
+        }
+    }
+}
+
+now, jobCounter = coroutineScope.launch { } and job = coroutineScope.launch { }. both will get
+executed concurrently as they are in different coroutine scope. Launched differently, the 
+default dispatcher for both the coroutine is Main Thread.
+
+----------------------------------
+	SUSPENSION Vs BLOCKING
+----------------------------------
+
+Blocking makes the thread to be blocked and will not execute any other code / do no operations.
+Blocking calls/code will not allow the thread to do any other operations.
+
+Where as suspending will suspend the next line of code with in that context, but will not block
+the thread, thread can continue executing other parts of code.
+
+	// the below block/scope of job will execute on the Main thread, If theres a suspending call then
+	main-thread will continue executing other parts of code and return back to the suspended area of 
+	code when the suspending reason is over.
+
+            jobCounter = coroutineScope.launch { // started in different scope, default is Main-Thread
+                updateRemainingTime(benchmarkDurationSeconds) // this is "suspend" function
+            }
+
+	// the below block/scope of job will execute on the Main thread, If theres a suspending call then
+	main-thread will continue executing other parts of code(outside the couroutine scope) and return 
+	back to the suspended area of code when the suspending reason is over.
+	
+            job = coroutineScope.launch {		// started in different scope, default is Main-Thread
+                btnStart.isEnabled = false
+                val iterationsCount = executeBenchmark(benchmarkDurationSeconds) // this is "suspend" function
+                // since the below line of code is in this coroutine scope, it will not get executed by
+                //main thread, until the above line of suspend function completes execution.
+                Toast.makeText(requireContext(), "$iterationsCount", Toast.LENGTH_SHORT).show()
+                btnStart.isEnabled = true
+            }
+    
+    // code in this line and below will continue to execute in main thread, above coroutine block of code
+    will not affect the main thread to continue executing the code here
+
+    Because of this suspend way of executing code blocks(coroutine scope blocks(using launch{})), we 
+    can observe the concurrency is acheived between different code blocks which is executed in a single
+    thread(main Thread), Standard JVM threads cant acheive this feature.
+
+-------------------------------------------------
+	COROUTINES SCOPES CHILDREN CANCELLATION
+-------------------------------------------------
+
+Instead of capturing "job" of every coroutine and invoking "cancel()" on the job in onStop(),
+when UI exits because of User press back/home key.
+
+we can directly cancel all coroutine scopes by invoking the cancelChildren() on the main 
+coroutine scope, which will cancel all the child/sub coroutine activities
+
+class ConcurrentCoroutinesDemoFragment : BaseFragment() {
+	private val coroutineScope = CoroutineScope(Dispatchers.Main.immediate) // "parent or Main" coroutine scope
+
+	// private var jobCounter: Job? = null // not required to capture the Job to cancel()
+    // private var job: Job? = null
+
+     override fun onCreateView(inflater: LayoutInflater, 
+							     container: ViewGroup?, 
+							     savedInstanceState: Bundle?): View? {
+
+		 btnStart.setOnClickListener {
+            logThreadInfo("button callback")
+
+            val benchmarkDurationSeconds = 5
+
+            coroutineScope.launch { // child coroutine scope, launched from parent scope
+                updateRemainingTime(benchmarkDurationSeconds) // this is "suspend" function
+            }
+
+            coroutineScope.launch {		// child coroutine scope, launched from parent scope
+                btnStart.isEnabled = false
+                val iterationsCount = executeBenchmark(benchmarkDurationSeconds) // this is "suspend" function
+                Toast.makeText(requireContext(), "$iterationsCount", Toast.LENGTH_SHORT).show()
+                btnStart.isEnabled = true
+            }
+        }
+        return view
+    }
+
+    override fun onStop() {
+        logThreadInfo("onStop()")
+        super.onStop()
+
+        // job?.cancel()                           // not required, as we cancel all children scope using
+        //jobCounter?.apply {                      // parent scope.
+        //    cancel()
+        //}
+		
+		btnStart.isEnabled = true                  
+		txtRemainingTime.text = "done!"
+        
+        // instead of cancelling individual jobs, child coroutine scopes
+        // we use the Main/Parent coroutine scope and cancel() all of its children coroutine activites
+        // below method call will cancel all current running child coroutine activites which is launched
+        // from the Main coroutine scope
+        coroutineScope.coroutineContext.cancelChildren()
+    }
+}
+
+-------------------------------------------------
+	COROUTINES SUMMARY
+-------------------------------------------------
+
+	*	coroutine is an abstract construct representing a sequence of steps
+	*	Steps with in a coroutine execute sequentially.
+	*	steps with-in a coroutine can execute on different coroutine Dispatchers
+
+	CoRoutine Dispatchers:
+	-----------------------
+	*	coroutine dispatcher executes coroutine steps on a specific thread or group of threads.
+	*	single coroutine can use multiple coroutine dispatchers
+	*	Dispatchers.Main is a special coroutine dispatcher corresponding to UI thread in android
+	applications.
+
+	Suspending Function:
+	--------------------
+	*	Suspending function is a special type of function which can only be invoked with in a 
+	coroutine (either directly, or by another suspending function)
+	*	Parent coroutine will wait for suspending function to complete before proceeding to the 
+	next step.
+	*	Suspending functions can "suspend" the execution, entering waiting state, but without 
+	blocking the calling thread.
+
+	Job:
+	----
+	*	Each coroutine is associated with a Job.
+	*	Coroutine Job is cancellable.
+	*	Cancellation of coroutine's Job cancel the coroutine itself.
+
+	CoRoutine Scope:
+	----------------
+	*	CoroutineScope is a kind of a "box" that contains launched coroutines.
+	*	More than one coroutine can be associated with CoroutineScope at any instant of time.
+	*	CoroutineScope can cancel all its children coroutines.
+
+
+
+-------------------------------------------------------------------------------------------------------------------
+									COROUTINES SCOPE CANCELLATION
+-------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------
+Scope Cancellation Vs Scope's Children Cancellation:
+-------------------------------------------------------
+
+coroutineScope.cancel() Vs coroutineScope.coroutineContext.cancelChildren()
+
+Using "coroutineScope.cancel()" to cancel all its children::
+	After this method call we can nolonger use "coroutineScope" instance to launch/create a new
+	coroutiene scope. If we use such cancel() called coroutineScope then the code in that scope,
+	wont get executed(no exception is thrown, no logs can be seen on logcat), We have to again 
+	get a newer instance of coroutineScope using 
+
+	private val coroutineScope =  CoroutineScope(Dispatchers.Main.immediate)
+
+	and then to use it to launch a coroutiene. like
+
+	coroutineScope.launch {
+
+	}
+
+Using coroutineScope.coroutineContext.cancelChildren() to cancel all its children::
+
+	After this method call we can still use "coroutineScope" instance to launch/create a new
+	coroutiene scope. only the existing childrens(coroutinescopes.launch{}) will get cancelled.
+	we can still use coroutineScope.launch {} to launch new childrens.
+
+-------------------------------------
+CoRoutine Scope inside ViewModel::
+-------------------------------------	
+
+
+class MyViewModel: ViewModel() {
+
+    private val coroutineScope = CoroutineScope(Dispatchers.Default)
+
+    private val _elapsedTime = MutableLiveData<Long>()
+    val elapsedTime: LiveData<Long> = _elapsedTime
+
+    private val _isTrackingTime = MutableLiveData<Boolean>()
+    val isTrackingTime: LiveData<Boolean> = _isTrackingTime
+
+    fun toggleTrackElapsedTime() {
+        val isTrackingTimeNow = isTrackingTime.value
+        logThreadInfo("trackElapsedTime(); isTrackingTimeNow = $isTrackingTimeNow")
+        if (isTrackingTimeNow == null || !isTrackingTimeNow) {
+            startTracking()
+        } else {
+            stopTracking()
+        }
+    }
+
+    private fun startTracking() = coroutineScope.launch {
+        logThreadInfo("startTracking()")
+        _isTrackingTime.postValue(true)
+
+        val startTimeNano = System.nanoTime()
+
+        while (true) {
+            val elapsedTimeSeconds = (System.nanoTime() - startTimeNano) / 1_000_000_000L
+            logThreadInfo("elapsed time: $elapsedTimeSeconds seconds")
+            _elapsedTime.postValue(elapsedTimeSeconds)
+            delay(1000)
+        }
+    }
+
+    private fun stopTracking() {
+        logThreadInfo("stopTracking()")
+        _isTrackingTime.postValue(false)
+        coroutineScope.coroutineContext.cancelChildren()
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        coroutineScope.cancel()
+        // coroutineScope.coroutineContext.cancelChildren() // <- will also work here
+    }
+
+}
+
+startTracking() and stopTracking(), methods are called by the Fragment to toggle the functionality
+of a button in Fragment. 
+
+elapsedTime and isTrackingTime are the LiveData properties in ViewModel which are observed by
+the Fragment for the change in state of the values which are maintained in ViewModel.
+
+When button in the fragment is Toggled, startTracking() and stopTracking() methods are called
+to start and stop counting and again to restart counting when toggled again. 
+
+stopTracking() will cancel the coroutine launched by startTracking(), We use 
+coroutineScope.coroutineContext.cancelChildren() in stopTracking() to cancel the couroutine
+launched from coroutineScope. so for the next time, when again startTracking is called by the 
+Fragment, coroutineScope should be able to launch a new coroutine to start counting again.
+
+If we use coroutineScope.cancel() in stopTracking() method instead of 
+coroutineScope.coroutineContext.cancelChildren(). coroutineScope.cancel() will cancel the 
+coroutineScope instance, therefore coroutineScope instance will lose the ability to "launch" 
+new coroutine when fragment want to startTracking().
+
+Hence to reuse the coroutineScope instance when startTracking() and stopTracking() is called
+multiple times we have to only use coroutineScope.coroutineContext.cancelChildren() in stopTracking().
+we should not use coroutineScope.cancel() in stopTracking() which will make the coroutineScope to lose
+its ability to launch a new coroutine and break the functionality of Fragment.
+
+
+Consider a Scenario:
+---------------------
+In Fragment, startTracking button is pressed. Which will trigger viewModel to startTracking(), in
+startTracking() we launch a coroutine to start counting. 
+If user presses (home / back) which close/exit the Fragment. This user action will close/kill
+the fragment and ViewModel. But coroutine which is launched in viewModel still continue to
+count/execute in background. Now there is no way to stop/cancel the coroutine.
+This coroutine and the resources used with in it becomes memory Leak.
+
+In this scenario, we cannot stop/unregister the resources in onStop() method of Fragment, Because
+the Fragment uses ViewModel which will even survive on the configuration changes of the Fragment/activity
+
+To acheive the functionality of "cancelling/unregistering/stopping all coroutine" functionlities when 
+ViewModel(is freed/killed by system) is no longer needed by the system. We have to define the
+"cancelling/unregistering/stopping all coroutine" in the onCleared() lifecycle method of ViewModel.
+
+   override fun onCleared() {
+        super.onCleared()
+        coroutineScope.cancel() // cancel() is right method to use here, as viewModel is not reused anymore
+        // coroutineScope.coroutineContext.cancelChildren() // <- will also work here
+    }
+
+onCleared() method is called by AndroidFramework on the ViewModel instance, when its guarenteed that 
+ViewModel instance is no longer needed, Android framework will call onCleared() before clearing the
+ViewModel instance.
+
+--------------------------------------------------------
+CoRoutine Scope From Kotlin Extensions For ViewModel::
+--------------------------------------------------------
+
+Inside ViewModels instead of using CoroutineScope, we can use ViewModelScope when we include an
+extension as part of dependencies in Gradle file. We can directly use ViewModelScope instance
+inside ViewModels, the ViewModelScope lifetime is managed by the Android-Framework, we dont need to 
+explicitly manage it by cancelling all children coroutiene-scope in onCleared() method of ViewModel.
+
+we dont need to create a CoroutineScope inside ViewModel like the code below
+
+	private val coroutineScope = CoroutineScope(Dispatchers.Default)
+
+we dont need to explicitly close all running coroutineScope in onCleared() method of
+viewModel like the code below
+
+   override fun onCleared() {
+        super.onCleared()
+        coroutineScope.cancel() // cancel() is right method to use here, as viewModel is not reused anymore
+        // or
+        coroutineScope.coroutineContext.cancelChildren() // <- will also work here
+    }
+
+to use the ViewModelScope, include the below extension as part of app gradle dependencies
+
+    implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.2.0'
+
+Changes in ViewModel class, appears as below
+
+class MyViewModel: ViewModel() {
+	
+	//no viewModelScope instance is defined or acquired using Factory method, viewModelScope
+	// is a global instance available automatically to all classes who extends the ViewModel
+
+    private val _elapsedTime = MutableLiveData<Long>()
+    val elapsedTime: LiveData<Long> = _elapsedTime
+
+    private val _isTrackingTime = MutableLiveData<Boolean>()
+    val isTrackingTime: LiveData<Boolean> = _isTrackingTime
+
+    fun toggleTrackElapsedTime() {
+        val isTrackingTimeNow = isTrackingTime.value
+        logThreadInfo("trackElapsedTime(); isTrackingTimeNow = $isTrackingTimeNow")
+        if (isTrackingTimeNow == null || !isTrackingTimeNow) {
+            startTracking()
+        } else {
+            stopTracking()
+        }
+    }
+
+    private fun startTracking() = viewModelScope.launch {       // viewModelScope is launched like 
+        logThreadInfo("startTracking()")                  // same we did for coroutineScope
+        _isTrackingTime.postValue(true)
+
+        val startTimeNano = System.nanoTime()
+
+        while (true) {
+            val elapsedTimeSeconds = (System.nanoTime() - startTimeNano) / 1_000_000_000L
+            logThreadInfo("elapsed time: $elapsedTimeSeconds seconds")
+            _elapsedTime.postValue(elapsedTimeSeconds)
+            delay(1000)
+        }
+    }
+
+    private fun stopTracking() {
+        logThreadInfo("stopTracking()")
+        _isTrackingTime.postValue(false)
+        viewModelScope.coroutineContext.cancelChildren()
+    }
+
+    // no onCleared() method is defined, viewModelScope and all of its children is 
+    //closed automatically when the lifetime of this ViewModel is garbage collected.
+}
+
+viewModelScope is the officially recommended way of using coroutine inside ViewModel.
+
+----------------------------------------
+CoroutineScope Cancellation Summary:
+----------------------------------------
+	*	two ways to cancel all CoroutineScope's child coroutines.
+		1. coroutineScope.cancel() 
+       	2. coroutineScope.coroutineContext.cancelChildren()
+    	*	(coroutineScope.cancel() )cancelled CoroutineScope becomes "dead" and can't be 
+    		used to launch new coroutines (silently discards launch attempts)
+
+    *	Avoid full CoroutineScope cancellation (coroutineScope.cancel()) to prevent 
+    	potential future tricky bugs.
+
+    
